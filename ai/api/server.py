@@ -19,8 +19,8 @@ from loguru import logger
 
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from src.config import DocuNetConfig
-from src.pipeline import DocuNetPipeline
+from ai.config import DocuNetConfig
+from ai.pipeline import DocuNetPipeline
 
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
@@ -107,8 +107,6 @@ class HealthResponse(BaseModel):
     pipeline_loaded: bool
 
 
-
-
 def decode_upload(file_bytes: bytes) -> np.ndarray:
     """Decode uploaded file bytes to OpenCV image with size validation."""
     if len(file_bytes) > MAX_UPLOAD_BYTES:
@@ -132,6 +130,19 @@ def encode_image_base64(image: np.ndarray, format: str = ".jpg") -> str:
     """Encode OpenCV image to base64 string."""
     _, buffer = cv2.imencode(format, image)
     return base64.b64encode(buffer).decode("utf-8")
+
+
+def make_json_safe(obj):
+    """Convert NumPy types to native Python types for JSON serialization."""
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, np.generic):
+        return obj.item()
+    if isinstance(obj, dict):
+        return {key: make_json_safe(value) for key, value in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [make_json_safe(value) for value in obj]
+    return obj
 
 
 @app.get("/api/v1/health", response_model=HealthResponse)
@@ -160,7 +171,9 @@ async def verify_document(
     pipeline = get_pipeline()
     result = pipeline.process(image, skip_quality_gate=skip_quality_gate)
 
-    return VerifyResponse(**result.to_dict())
+    data = make_json_safe(result.to_dict())
+
+    return VerifyResponse(**data)
 
 
 @app.post("/api/v1/ela-only")
@@ -173,7 +186,9 @@ async def ela_analysis(file: UploadFile = File(...)):
     result = pipeline.process(image, skip_ocr=True, skip_quality_gate=True)
 
     response = {
-        "tamper_detection": result.ela_result.to_dict() if result.ela_result else None,
+        "tamper_detection": make_json_safe(
+            result.ela_result.to_dict() if result.ela_result else None
+        ),
     }
 
     if result.ela_result and result.ela_result.heatmap is not None:
@@ -198,10 +213,12 @@ async def batch_verify(files: List[UploadFile] = File(...)):
             file_bytes = await file.read()
             image = decode_upload(file_bytes)
             result = pipeline.process(image)
+
             results.append({
                 "filename": file.filename,
-                "result": result.to_dict(),
+                "result": make_json_safe(result.to_dict()),
             })
+
         except (ValueError, RuntimeError, cv2.error) as e:
             results.append({
                 "filename": file.filename,
@@ -244,19 +261,20 @@ async def live_capture(websocket: WebSocket):
                     await websocket.send_json({
                         "type": "ready",
                         "message": "Quality OK — capturing...",
-                        "quality": report.to_dict(),
+                        "quality": make_json_safe(report.to_dict()),
                     })
 
                     result = pipeline.process(frame)
 
                     await websocket.send_json({
                         "type": "result",
-                        "data": result.to_dict(),
+                        "data": make_json_safe(result.to_dict()),
                     })
+
                 else:
                     await websocket.send_json({
                         "type": "guidance",
-                        "quality": report.to_dict(),
+                        "quality": make_json_safe(report.to_dict()),
                         "issues": report.issues,
                     })
 
