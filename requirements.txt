@@ -40,6 +40,10 @@ httpx>=0.25.0
 # ─── Dev ───
 ruff>=0.1.0
 mypy>=1.7.0
+<<<<<<< HEAD
 pre-commit>=3.5.0
 
 insightface
+=======
+pre-commit>=3.5.0
+>>>>>>> c32bbd5d1360cffbac82c304346c4979b5e7f67a
