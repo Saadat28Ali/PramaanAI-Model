@@ -34,7 +34,7 @@ Most "ID verification" tools stop at OCR. PramaanAI treats the image itself as e
 - 🪪 **Face verification, not just face detection** — powered by **InsightFace**, matching the face on the document against a live selfie/capture to confirm the ID actually belongs to the presenter.
 - 🧠 **Document-aware preprocessing** — automatic edge detection, perspective rectification, glare removal, and OCR-specific enhancement, so verification quality doesn't degrade with a bad phone photo.
 - ⚡ **Real-world deployable** — FastAPI REST + WebSocket live-capture support, rate limiting, request tracing, a Streamlit dashboard, and a full CLI, out of the box.
-- 🧩 **Config-driven and typed** — every threshold in the pipeline (blur, glare, ELA sensitivity, copy-move inliers, face-match threshold) is a versioned dataclass, overridable via YAML or env vars — no magic numbers buried in code.
+- 🧩 **Config-driven and typed** — every threshold in the pipeline (blur, glare, ELA sensitivity, copy-move inliers, face-match threshold) is a versioned dataclass, overridable via YAML or env vars no magic numbers buried in code.
 
 ---
 
