@@ -20,6 +20,7 @@ from ai.protocols import (
     OCRExtractor,
     FieldExtractor,
 )
+
 from ai.preprocessing.quality_gate import QualityGate, QualityReport
 from ai.preprocessing.rectifier import DocumentRectifier, RectificationResult
 from ai.preprocessing.enhancement import ImageEnhancer
@@ -134,7 +135,9 @@ class DocuNetPipeline:
         )
         self.ocr_manager = OCREngineManager(self.config.ocr)
         self.field_parser = FieldParser()
-        self.face_verifier = FaceVerifier()
+
+        # Face verifier is initialized only when selfie verification is requested.
+        self.face_verifier = None
 
         # DL tamper classifier (loaded only if checkpoint exists)
         self.dl_classifier = None
@@ -201,6 +204,10 @@ class DocuNetPipeline:
         if selfie_image is not None:
             t0 = time.time()
             try:
+                # Initialize the face verifier only when it is actually needed.
+                if self.face_verifier is None:
+                    self.face_verifier = FaceVerifier()
+
                 face_result = self.face_verifier.compare_document_and_selfie(
                     document_image=working_image,
                     selfie_image=selfie_image,
@@ -317,6 +324,7 @@ class DocuNetPipeline:
                 stage_reached="input",
                 error_message=f"Could not read image: {image_path}",
             )
+
         return self.process(
             image=image,
             skip_quality_gate=skip_quality_gate,
