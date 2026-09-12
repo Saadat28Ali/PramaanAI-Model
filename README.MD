@@ -38,45 +38,6 @@ Most "ID verification" tools stop at OCR. PramaanAI treats the image itself as e
 
 ---
 
-## Pipeline Overview
-
-Every document that enters PramaanAI moves through a single orchestrated pipeline (`DocuNetPipeline`), with each stage timed, logged, and independently serializable:
-
-```
-                                   ┌─────────────────────┐
-                                   │   Input ID Image    │
-                                   └──────────┬───────────┘
-                                              ▼
-                          1. Quality Gate  (blur · brightness · contrast · glare · resolution)
-                                              ▼
-                          2. Rectification  (edge detection → homography → perspective warp)
-                                              ▼
-                          3. Glare Removal  (HSV highlight masking → inpainting)
-                                              ▼
-                          4. Enhancement    (CLAHE · denoise · Sauvola binarization for OCR)
-                                              ▼
-        ┌─────────────────────────────────────┴──────────────────────────────────────┐
-        ▼                                                                              ▼
- 5a. Forensic Tamper Suite                                                   5b. Robust OCR Engine
-     • Error Level Analysis (ELA)                                               • PaddleOCR / EasyOCR
-     • DCT block-artifact analysis                                               • Confidence-weighted fallback
-     • Noise-inconsistency mapping                                              ▼
-     • JPEG ghost detection                                              6. Field Parsing
-     • Copy-move forgery detection (ORB + RANSAC)                            (name, DOB, ID no., address…)
-     • CNN tamper classifier (MobileNetV3-Small + Grad-CAM)
-        ▼
-                                              ▼
-                          7. Face Verification (InsightFace)
-                             extract face embedding from ID  ⟷  match against live capture
-                                              ▼
-                          ┌───────────────────────────────────┐
-                          │   Verdict + Full Forensic Report   │
-                          └───────────────────────────────────┘
-```
-
-Every stage produces a structured, JSON-serializable result — nothing is a black box.
-
----
 
 ## Core Capabilities
 
@@ -267,10 +228,7 @@ pipeline = DocuNetPipeline(config)
 
 ## Disclaimer
 
-PramaanAI is a decision-support tool for document and identity verification. Forensic and face-match scores should be reviewed as part of a broader verification process, not treated as an infallible, standalone verdict — especially in regulated KYC/AML contexts.
+PramaanAI is a decision-support tool for document and identity verification. Forensic and face-match scores should be reviewed as part of a broader verification process, not treated as an infallible, standalone verdict especially in regulated KYC/AML contexts.
 
 ---
-
-<div align="center">
-Built with OpenCV, PyTorch, PaddleOCR/EasyOCR, InsightFace, and FastAPI.
 </div>
