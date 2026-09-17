@@ -1,5 +1,5 @@
 # ─── Core ───
-opencv-python>=4.8.0
+opencv-contrib-python-headless>=4.8.0
 numpy>=1.24.0
 
 # ─── OCR ───
@@ -40,10 +40,4 @@ httpx>=0.25.0
 # ─── Dev ───
 ruff>=0.1.0
 mypy>=1.7.0
-<<<<<<< HEAD
 pre-commit>=3.5.0
-
-insightface
-=======
-pre-commit>=3.5.0
->>>>>>> c32bbd5d1360cffbac82c304346c4979b5e7f67a

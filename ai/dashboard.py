@@ -1,10 +1,7 @@
 """
 DocuNet Dashboard — Interactive document verification UI.
 
-<<<<<<< HEAD
-=======
-Run:  streamlit run src/dashboard.py
->>>>>>> c32bbd5d1360cffbac82c304346c4979b5e7f67a
+Run:  streamlit run ai/dashboard.py
 """
 
 import streamlit as st
@@ -18,13 +15,8 @@ _PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-<<<<<<< HEAD
 from ai.config import DocuNetConfig
 from ai.pipeline import DocuNetPipeline
-=======
-from src.config import DocuNetConfig
-from src.pipeline import DocuNetPipeline
->>>>>>> c32bbd5d1360cffbac82c304346c4979b5e7f67a
 
 st.set_page_config(
     page_title="DocuNet",
@@ -381,7 +373,6 @@ st.markdown(
 )
 
 
-<<<<<<< HEAD
 st.markdown(
     '<div class="dn-label">Identity Verification</div>',
     unsafe_allow_html=True,
@@ -402,12 +393,6 @@ selfie_file = st.file_uploader(
     "Upload Selfie for Face Verification",
     type=["jpg", "jpeg", "png", "bmp", "webp"],
     label_visibility="visible",
-=======
-uploaded_file = st.file_uploader(
-    "drop_zone",
-    type=["jpg", "jpeg", "png", "bmp", "webp"],
-    label_visibility="collapsed",
->>>>>>> c32bbd5d1360cffbac82c304346c4979b5e7f67a
 )
 
 
@@ -429,7 +414,6 @@ if image is None:
     st.stop()
 
 
-<<<<<<< HEAD
 selfie_image = None
 
 if selfie_file is not None:
@@ -447,19 +431,13 @@ if selfie_file is not None:
         st.error("Could not decode the selfie file.")
         st.stop()
 
-
-=======
->>>>>>> c32bbd5d1360cffbac82c304346c4979b5e7f67a
 with st.spinner("Running analysis…"):
     pipeline = load_pipeline()
     result   = pipeline.process(
         image,
         skip_quality_gate=skip_quality,
         skip_ocr=skip_ocr,
-<<<<<<< HEAD
         selfie_image=selfie_image,
-=======
->>>>>>> c32bbd5d1360cffbac82c304346c4979b5e7f67a
     )
 
 
@@ -470,7 +448,6 @@ if result.ela_result:
     is_tampered  = result.ela_result.is_tampered
 
 ocr_conf = result.ocr_result.avg_confidence if result.ocr_result else 0.0
-<<<<<<< HEAD
 face_result = result.face_verification_result
 
 
@@ -529,8 +506,6 @@ if face_result is not None:
                 ),
                 unsafe_allow_html=True,
             )
-=======
->>>>>>> c32bbd5d1360cffbac82c304346c4979b5e7f67a
 
 
 if is_tampered:
