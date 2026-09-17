@@ -11,7 +11,16 @@ import asyncio
 from typing import Optional, List
 from pathlib import Path
 
-from fastapi import FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect, HTTPException, Request, Response
+from fastapi import (
+    FastAPI,
+    File,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+    HTTPException,
+    Request,
+    Response,
+)
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -40,7 +49,7 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 app = FastAPI(
     title="DocuNet API",
     description="ID Card Tamper Detection & Robust OCR Pipeline",
-    version="1.0.0",
+    version="1.1.0",
     docs_url="/docs",
     redoc_url="/redoc",
 )
@@ -98,6 +107,7 @@ class VerifyResponse(BaseModel):
     tamper_detection: Optional[dict] = None
     ocr: Optional[dict] = None
     document: Optional[dict] = None
+    face_verification: Optional[dict] = None
     timings: dict
 
 
@@ -114,15 +124,19 @@ def decode_upload(file_bytes: bytes) -> np.ndarray:
             status_code=413,
             detail=f"Upload exceeds {MAX_UPLOAD_BYTES // (1024*1024)} MB limit.",
         )
+
     if len(file_bytes) == 0:
         raise HTTPException(status_code=400, detail="Empty file uploaded.")
+
     nparr = np.frombuffer(file_bytes, np.uint8)
     image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
     if image is None:
         raise HTTPException(
             status_code=400,
             detail="Could not decode image. Supported formats: JPEG, PNG, BMP.",
         )
+
     return image
 
 
@@ -136,12 +150,22 @@ def make_json_safe(obj):
     """Convert NumPy types to native Python types for JSON serialization."""
     if isinstance(obj, np.ndarray):
         return obj.tolist()
+
     if isinstance(obj, np.generic):
         return obj.item()
+
     if isinstance(obj, dict):
-        return {key: make_json_safe(value) for key, value in obj.items()}
+        return {
+            key: make_json_safe(value)
+            for key, value in obj.items()
+        }
+
     if isinstance(obj, (list, tuple)):
-        return [make_json_safe(value) for value in obj]
+        return [
+            make_json_safe(value)
+            for value in obj
+        ]
+
     return obj
 
 
@@ -158,18 +182,36 @@ async def health_check():
 @app.post("/api/v1/verify", response_model=VerifyResponse)
 async def verify_document(
     file: UploadFile = File(...),
+    selfie_file: Optional[UploadFile] = File(None),
     skip_quality_gate: bool = False,
 ):
-    """Verify a single document image through the full pipeline."""
-    logger.info(f"Received verification request: {file.filename}")
+    """Verify a document and optionally compare it with a selfie."""
 
-    # Read and decode
+    logger.info(
+        f"Received verification request: "
+        f"document={file.filename}, "
+        f"selfie={selfie_file.filename if selfie_file else None}"
+    )
+
+    # Read and decode document image
     file_bytes = await file.read()
     image = decode_upload(file_bytes)
 
-    # Process
+    # Read and decode optional selfie image
+    selfie_image = None
+
+    if selfie_file is not None:
+        selfie_bytes = await selfie_file.read()
+        selfie_image = decode_upload(selfie_bytes)
+
+    # Process through pipeline
     pipeline = get_pipeline()
-    result = pipeline.process(image, skip_quality_gate=skip_quality_gate)
+
+    result = pipeline.process(
+        image,
+        selfie_image=selfie_image,
+        skip_quality_gate=skip_quality_gate,
+    )
 
     data = make_json_safe(result.to_dict())
 
@@ -192,10 +234,14 @@ async def ela_analysis(file: UploadFile = File(...)):
     }
 
     if result.ela_result and result.ela_result.heatmap is not None:
-        response["heatmap_base64"] = encode_image_base64(result.ela_result.heatmap)
+        response["heatmap_base64"] = encode_image_base64(
+            result.ela_result.heatmap
+        )
 
     if "ela_overlay" in result.images:
-        response["overlay_base64"] = encode_image_base64(result.images["ela_overlay"])
+        response["overlay_base64"] = encode_image_base64(
+            result.images["ela_overlay"]
+        )
 
     return JSONResponse(content=response)
 
@@ -225,7 +271,12 @@ async def batch_verify(files: List[UploadFile] = File(...)):
                 "error": str(e),
             })
 
-    return JSONResponse(content={"results": results, "total": len(results)})
+    return JSONResponse(
+        content={
+            "results": results,
+            "total": len(results),
+        }
+    )
 
 
 @app.websocket("/ws/live-capture")
@@ -291,6 +342,7 @@ async def live_capture(websocket: WebSocket):
 def start_server(host: str = "0.0.0.0", port: int = 8000):
     """Start the API server."""
     import uvicorn
+
     uvicorn.run(app, host=host, port=port)
 
 
