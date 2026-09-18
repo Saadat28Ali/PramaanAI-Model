@@ -1,8 +1,8 @@
 <div align="center">
 
-# ◈ PramaanAI — DocuNet
+# ◈ PramaanAI ( DocuNet)
 
-**AI-powered ID document verification: tamper forensics, robust OCR, and face-match identity verification — in one pipeline.**
+**AI-powered ID document verification: tamper forensics, robust OCR, and face-match identity verification in one pipeline.**
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](.)
 [![FastAPI](https://img.shields.io/badge/API-FastAPI-009688)](.)
