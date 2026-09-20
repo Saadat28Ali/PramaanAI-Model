@@ -29,7 +29,10 @@ class ParsedDocument:
     def to_dict(self) -> dict:
         return {
             "fields": {
-                k: {"value": v.value, "confidence": round(v.confidence, 4)}
+                k: {
+                    "value": v.value,
+                    "confidence": round(v.confidence, 4),
+                }
                 for k, v in self.fields.items()
             },
             "document_type": self.document_type,
@@ -37,7 +40,6 @@ class ParsedDocument:
             "raw_text": self.raw_text,
             "unmatched_text": self.unmatched_text,
         }
-
 
 
 # Indian Aadhaar Card
@@ -48,11 +50,13 @@ AADHAAR_PATTERNS = {
     "vid": r"\b(?:VID)[:\s]*(\d{4}\s?\d{4}\s?\d{4}\s?\d{4})\b",
 }
 
+
 # Indian PAN Card
 PAN_PATTERNS = {
     "pan_number": r"\b[A-Z]{5}\d{4}[A-Z]\b",
     "dob": r"\b(\d{2}[/\-\.]\d{2}[/\-\.]\d{4})\b",
 }
+
 
 # US Driver's License (generic patterns)
 DRIVERS_LICENSE_PATTERNS = {
@@ -61,6 +65,7 @@ DRIVERS_LICENSE_PATTERNS = {
     "expiry": r"\b(?:EXP|EXPIRES?)[:\s]*(\d{2}[/\-]\d{2}[/\-]\d{4})\b",
     "class": r"\b(?:CLASS)[:\s]*([A-Z])\b",
 }
+
 
 # Generic patterns that work across document types
 GENERIC_PATTERNS = {
@@ -72,12 +77,33 @@ GENERIC_PATTERNS = {
     "date_generic": r"\b\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4}\b",
 }
 
+
 # Keywords to identify document type
 DOC_TYPE_KEYWORDS = {
-    "aadhaar": ["aadhaar", "uidai", "unique identification", "आधार"],
-    "pan": ["income tax", "permanent account", "pan card", "govt of india"],
-    "drivers_license": ["driver", "license", "driving", "motor vehicle", "dmv"],
-    "passport": ["passport", "republic of india", "nationality"],
+    "aadhaar": [
+        "aadhaar",
+        "uidai",
+        "unique identification",
+        "आधार",
+    ],
+    "pan": [
+        "income tax",
+        "permanent account",
+        "pan card",
+        "govt of india",
+    ],
+    "drivers_license": [
+        "driver",
+        "license",
+        "driving",
+        "motor vehicle",
+        "dmv",
+    ],
+    "passport": [
+        "passport",
+        "republic of india",
+        "nationality",
+    ],
 }
 
 
@@ -93,40 +119,62 @@ class FieldParser:
 
     def parse(self, ocr_result: OCRResult) -> ParsedDocument:
         """Parse OCR results into structured document fields."""
+
         full_text = ocr_result.full_text
         boxes = ocr_result.boxes
 
         doc_type = self._detect_document_type(full_text)
-        logger.info(f"Detected document type: {doc_type}")
+
+        logger.info(
+            f"Detected document type: {doc_type}"
+        )
 
         fields = {}
 
         if doc_type in self.pattern_sets:
             type_fields = self._extract_with_patterns(
-                full_text, self.pattern_sets[doc_type], boxes
+                full_text,
+                self.pattern_sets[doc_type],
+                boxes,
             )
+
             fields.update(type_fields)
 
         generic_fields = self._extract_with_patterns(
-            full_text, GENERIC_PATTERNS, boxes
+            full_text,
+            GENERIC_PATTERNS,
+            boxes,
         )
+
         for key, value in generic_fields.items():
             if key not in fields:
                 fields[key] = value
 
         if "name" not in fields:
             name_field = self._extract_name_spatial(boxes)
+
             if name_field:
                 fields["name"] = name_field
 
-        matched_texts = {f.value.strip().lower() for f in fields.values()}
+        matched_texts = {
+            f.value.strip().lower()
+            for f in fields.values()
+        }
+
         unmatched = [
-            b.text for b in boxes
-            if b.text.strip().lower() not in matched_texts and len(b.text.strip()) > 2
+            b.text
+            for b in boxes
+            if (
+                b.text.strip().lower() not in matched_texts
+                and len(b.text.strip()) > 2
+            )
         ]
 
         if fields:
-            overall_conf = sum(f.confidence for f in fields.values()) / len(fields)
+            overall_conf = (
+                sum(f.confidence for f in fields.values())
+                / len(fields)
+            )
         else:
             overall_conf = 0.0
 
@@ -139,18 +187,100 @@ class FieldParser:
         )
 
     def _detect_document_type(self, text: str) -> str:
-        """Detect document type from keyword matching."""
+        """
+        Detect document type using OCR keywords and
+        document-specific patterns.
+
+        This is intentionally lightweight and does not
+        perform another OCR operation.
+        """
+
         text_lower = text.lower()
-        scores = {}
+
+        scores = {
+            "aadhaar": 0,
+            "pan": 0,
+            "drivers_license": 0,
+            "passport": 0,
+        }
+
+        # --------------------------------------------------
+        # 1. Normal keyword matching
+        # --------------------------------------------------
 
         for doc_type, keywords in DOC_TYPE_KEYWORDS.items():
-            score = sum(1 for kw in keywords if kw in text_lower)
-            if score > 0:
-                scores[doc_type] = score
+            for keyword in keywords:
+                if keyword in text_lower:
+                    scores[doc_type] += 1
 
-        if scores:
-            return max(scores, key=scores.get)
-        return "unknown"
+        # --------------------------------------------------
+        # 2. Aadhaar-specific OCR-tolerant detection
+        # --------------------------------------------------
+
+        # EasyOCR can misread "AADHAAR" as:
+        # AADH_, AADH, AADHA, AADHA_ etc.
+        #
+        # Examples matched:
+        #   aadhaar
+        #   aadh
+        #   aadh_
+        #   aadha
+        if re.search(r"\baadh[a-z_]*\b", text_lower):
+            scores["aadhaar"] += 2
+
+        # Aadhaar number consists of 12 digits and OCR may
+        # separate them using spaces.
+        if re.search(
+            r"(?<!\d)\d{4}\s*\d{4}\s*\d{4}(?!\d)",
+            text,
+        ):
+            scores["aadhaar"] += 3
+
+        # --------------------------------------------------
+        # 3. PAN-specific detection
+        # --------------------------------------------------
+
+        if re.search(
+            r"\b[A-Z]{5}\d{4}[A-Z]\b",
+            text.upper(),
+        ):
+            scores["pan"] += 4
+
+        # --------------------------------------------------
+        # 4. Passport-specific detection
+        # --------------------------------------------------
+
+        if "passport" in text_lower:
+            scores["passport"] += 4
+
+        # --------------------------------------------------
+        # 5. Driving-license detection
+        # --------------------------------------------------
+
+        if re.search(
+            r"\b(driver|driving|license|licence|"
+            r"motor vehicle|dmv)\b",
+            text_lower,
+        ):
+            scores["drivers_license"] += 2
+
+        # --------------------------------------------------
+        # 6. Select strongest document type
+        # --------------------------------------------------
+
+        valid_scores = {
+            doc_type: score
+            for doc_type, score in scores.items()
+            if score > 0
+        }
+
+        if not valid_scores:
+            return "unknown"
+
+        return max(
+            valid_scores,
+            key=valid_scores.get,
+        )
 
     def _extract_with_patterns(
         self,
@@ -158,16 +288,30 @@ class FieldParser:
         patterns: Dict[str, str],
         boxes: List[OCRBox],
     ) -> Dict[str, DocumentField]:
-        """Extract fields using regex patterns, matching results to OCR boxes for confidence."""
+        """Extract fields using regex patterns."""
+
         fields = {}
 
         for field_name, pattern in patterns.items():
-            match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+            match = re.search(
+                pattern,
+                text,
+                re.IGNORECASE | re.MULTILINE,
+            )
+
             if match:
-                value = match.group(1) if match.lastindex else match.group(0)
+                value = (
+                    match.group(1)
+                    if match.lastindex
+                    else match.group(0)
+                )
+
                 value = value.strip()
 
-                confidence = self._find_box_confidence(value, boxes)
+                confidence = self._find_box_confidence(
+                    value,
+                    boxes,
+                )
 
                 fields[field_name] = DocumentField(
                     field_name=field_name,
@@ -177,8 +321,13 @@ class FieldParser:
 
         return fields
 
-    def _find_box_confidence(self, text: str, boxes: List[OCRBox]) -> float:
-        """Find the OCR box best matching the extracted text and return its confidence."""
+    def _find_box_confidence(
+        self,
+        text: str,
+        boxes: List[OCRBox],
+    ) -> float:
+        """Find the OCR box best matching the extracted text."""
+
         if not boxes:
             return 0.5
 
@@ -187,37 +336,78 @@ class FieldParser:
 
         for box in boxes:
             box_text = box.text.lower().strip()
-            if text_lower in box_text or box_text in text_lower:
-                best_confidence = max(best_confidence, box.confidence)
+
+            if (
+                text_lower in box_text
+                or box_text in text_lower
+            ):
+                best_confidence = max(
+                    best_confidence,
+                    box.confidence,
+                )
 
         return best_confidence
 
-    def _extract_name_spatial(self, boxes: List[OCRBox]) -> Optional[DocumentField]:
-        """Extract name field via spatial heuristics (top of document, longest alphabetic text)."""
+    def _extract_name_spatial(
+        self,
+        boxes: List[OCRBox],
+    ) -> Optional[DocumentField]:
+        """
+        Extract name using spatial heuristics:
+        top portion of document + longest alphabetic text.
+        """
+
         if not boxes:
             return None
 
         sorted_boxes = sorted(
-            boxes, key=lambda b: min(pt[1] for pt in b.bbox)
+            boxes,
+            key=lambda b: min(
+                pt[1] for pt in b.bbox
+            ),
         )
 
-        cutoff = max(1, int(len(sorted_boxes) * 0.6))
+        cutoff = max(
+            1,
+            int(len(sorted_boxes) * 0.6),
+        )
+
         candidates = sorted_boxes[:cutoff]
 
         name_candidates = []
+
         for box in candidates:
             text = box.text.strip()
-            alpha_ratio = sum(c.isalpha() or c.isspace() for c in text) / max(len(text), 1)
+
+            alpha_ratio = (
+                sum(
+                    c.isalpha() or c.isspace()
+                    for c in text
+                )
+                / max(len(text), 1)
+            )
 
             if alpha_ratio > 0.8 and len(text) > 3:
-                keywords = {"name", "dob", "date", "address", "male", "female", "government"}
+                keywords = {
+                    "name",
+                    "dob",
+                    "date",
+                    "address",
+                    "male",
+                    "female",
+                    "government",
+                }
+
                 if text.lower() not in keywords:
                     name_candidates.append(box)
 
         if not name_candidates:
             return None
 
-        best = max(name_candidates, key=lambda b: len(b.text))
+        best = max(
+            name_candidates,
+            key=lambda b: len(b.text),
+        )
 
         return DocumentField(
             field_name="name",
