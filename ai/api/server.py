@@ -54,6 +54,7 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+
 # Environment-driven CORS
 _allowed_origins = os.environ.get(
     "DOCUNET_CORS_ORIGINS", "http://localhost:3000,http://localhost:8501"
@@ -69,6 +70,7 @@ app.add_middleware(
 
 app.add_middleware(RequestIDMiddleware)
 
+
 # Rate limiting (requires slowapi)
 try:
     from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -82,6 +84,7 @@ try:
 except ImportError:  # pragma: no cover
     _HAS_LIMITER = False
     logger.warning("slowapi not installed — API rate limiting disabled")
+
 
 # Lazy-load the pipeline
 _pipeline: Optional[DocuNetPipeline] = None
@@ -211,7 +214,6 @@ async def verify_document(
         image,
         selfie_image=selfie_image,
         skip_quality_gate=skip_quality_gate,
-        skip_ocr=True,
     )
 
     data = make_json_safe(result.to_dict())
@@ -226,7 +228,7 @@ async def ela_analysis(file: UploadFile = File(...)):
     image = decode_upload(file_bytes)
 
     pipeline = get_pipeline()
-    result = pipeline.process(image, skip_ocr=True, skip_quality_gate=True)
+    result = pipeline.process(image, skip_ocr=False, skip_quality_gate=True)
 
     response = {
         "tamper_detection": make_json_safe(
