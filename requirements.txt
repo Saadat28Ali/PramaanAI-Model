@@ -3,8 +3,7 @@ opencv-contrib-python-headless>=4.8.0
 numpy>=1.24.0
 
 # ─── OCR ───
-paddlepaddle>=2.5.0
-paddleocr>=2.7.0
+
 easyocr>=1.7.0
 
 # ─── Deep Learning ───
