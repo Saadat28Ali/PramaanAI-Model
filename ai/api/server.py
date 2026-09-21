@@ -12,14 +12,14 @@ from typing import Optional, List
 from pathlib import Path
 
 from fastapi import (
-FastAPI,
-File,
-UploadFile,
-WebSocket,
-WebSocketDisconnect,
-HTTPException,
-Request,
-Response,
+    FastAPI,
+    File,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+    HTTPException,
+    Request,
+    Response,
 )
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,309 +31,439 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from ai.config import DocuNetConfig
 from ai.pipeline import DocuNetPipeline
 
+
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
-class RequestIDMiddleware(BaseHTTPMiddleware):
-"""Inject X-Request-ID into every request/response for log correlation."""
 
-async def dispatch(self, request: Request, call_next):
-    request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
-    with logger.contextualize(request_id=request_id):
-        response: Response = await call_next(request)
-        response.headers["X-Request-ID"] = request_id
-        return response
+class RequestIDMiddleware(BaseHTTPMiddleware):
+    """Inject X-Request-ID into every request/response for log correlation."""
+
+    async def dispatch(self, request: Request, call_next):
+        request_id = request.headers.get(
+            "X-Request-ID",
+            str(uuid.uuid4()),
+        )
+
+        with logger.contextualize(request_id=request_id):
+            response: Response = await call_next(request)
+            response.headers["X-Request-ID"] = request_id
+            return response
+
 
 app = FastAPI(
-title="DocuNet API",
-description="ID Card Tamper Detection & Robust OCR Pipeline",
-version="1.1.0",
-docs_url="/docs",
-redoc_url="/redoc",
+    title="DocuNet API",
+    description="ID Card Tamper Detection & Robust OCR Pipeline",
+    version="1.1.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
 )
 
-Environment-driven CORS
+
+# Environment-driven CORS
 
 _allowed_origins = os.environ.get(
-"DOCUNET_CORS_ORIGINS", "http://localhost:3000,http://localhost:8501"
+    "DOCUNET_CORS_ORIGINS",
+    "http://localhost:3000,http://localhost:8501",
 ).split(",")
 
 app.add_middleware(
-CORSMiddleware,
-allow_origins=[o.strip() for o in _allowed_origins],
-allow_credentials=True,
-allow_methods=["GET", "POST"],
-allow_headers=["*"],
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in _allowed_origins],
+    allow_credentials=True,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
 )
 
 app.add_middleware(RequestIDMiddleware)
 
-Rate limiting (requires slowapi)
+
+# Rate limiting (requires slowapi)
 
 try:
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
-from slowapi.errors import RateLimitExceeded
+    from slowapi import Limiter, _rate_limit_exceeded_handler
+    from slowapi.util import get_remote_address
+    from slowapi.errors import RateLimitExceeded
 
-limiter = Limiter(key_func=get_remote_address, default_limits=["30/minute"])
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-_HAS_LIMITER = True
+    limiter = Limiter(
+        key_func=get_remote_address,
+        default_limits=["30/minute"],
+    )
+
+    app.state.limiter = limiter
+    app.add_exception_handler(
+        RateLimitExceeded,
+        _rate_limit_exceeded_handler,
+    )
+
+    _HAS_LIMITER = True
 
 except ImportError:  # pragma: no cover
-_HAS_LIMITER = False
-logger.warning("slowapi not installed — API rate limiting disabled")
+    _HAS_LIMITER = False
+    logger.warning(
+        "slowapi not installed — API rate limiting disabled"
+    )
 
-Lazy-load the pipeline
+
+# Lazy-load the pipeline
 
 _pipeline: Optional[DocuNetPipeline] = None
 
+
 def get_pipeline() -> DocuNetPipeline:
-"""Get or initialize the pipeline singleton."""
-global _pipeline
-if _pipeline is None:
-config = DocuNetConfig.default()
-_pipeline = DocuNetPipeline(config)
-return _pipeline
+    """Get or initialize the pipeline singleton."""
+    global _pipeline
+
+    if _pipeline is None:
+        config = DocuNetConfig.default()
+        _pipeline = DocuNetPipeline(config)
+
+    return _pipeline
+
 
 class VerifyResponse(BaseModel):
-success: bool
-stage_reached: str
-error_message: Optional[str] = None
-total_time_ms: float
-quality: Optional[dict] = None
-rectification: Optional[dict] = None
-glare: Optional[dict] = None
-tamper_detection: Optional[dict] = None
-ocr: Optional[dict] = None
-document: Optional[dict] = None
-face_verification: Optional[dict] = None
-timings: dict
+    success: bool
+    stage_reached: str
+    error_message: Optional[str] = None
+    total_time_ms: float
+    quality: Optional[dict] = None
+    rectification: Optional[dict] = None
+    glare: Optional[dict] = None
+    tamper_detection: Optional[dict] = None
+    ocr: Optional[dict] = None
+    document: Optional[dict] = None
+    face_verification: Optional[dict] = None
+    timings: dict
+
 
 class HealthResponse(BaseModel):
-status: str
-version: str
-pipeline_loaded: bool
+    status: str
+    version: str
+    pipeline_loaded: bool
+
 
 def decode_upload(file_bytes: bytes) -> np.ndarray:
-"""Decode uploaded file bytes to OpenCV image with size validation."""
-if len(file_bytes) > MAX_UPLOAD_BYTES:
-raise HTTPException(
-status_code=413,
-detail=f"Upload exceeds {MAX_UPLOAD_BYTES // (1024*1024)} MB limit.",
-)
+    """Decode uploaded file bytes to OpenCV image with size validation."""
 
-if len(file_bytes) == 0:
-    raise HTTPException(status_code=400, detail="Empty file uploaded.")
+    if len(file_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"Upload exceeds "
+                f"{MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit."
+            ),
+        )
 
-nparr = np.frombuffer(file_bytes, np.uint8)
-image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if len(file_bytes) == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Empty file uploaded.",
+        )
 
-if image is None:
-    raise HTTPException(
-        status_code=400,
-        detail="Could not decode image. Supported formats: JPEG, PNG, BMP.",
-    )
+    nparr = np.frombuffer(file_bytes, np.uint8)
+    image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-return image
+    if image is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Could not decode image. "
+                "Supported formats: JPEG, PNG, BMP."
+            ),
+        )
 
-def encode_image_base64(image: np.ndarray, format: str = ".jpg") -> str:
-"""Encode OpenCV image to base64 string."""
-_, buffer = cv2.imencode(format, image)
-return base64.b64encode(buffer).decode("utf-8")
+    return image
+
+
+def encode_image_base64(
+    image: np.ndarray,
+    format: str = ".jpg",
+) -> str:
+    """Encode OpenCV image to base64 string."""
+
+    _, buffer = cv2.imencode(format, image)
+
+    return base64.b64encode(buffer).decode("utf-8")
+
 
 def make_json_safe(obj):
-"""Convert NumPy types to native Python types for JSON serialization."""
-if isinstance(obj, np.ndarray):
-return obj.tolist()
+    """Convert NumPy types to native Python types for JSON serialization."""
 
-if isinstance(obj, np.generic):
-    return obj.item()
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
 
-if isinstance(obj, dict):
-    return {
-        key: make_json_safe(value)
-        for key, value in obj.items()
-    }
+    if isinstance(obj, np.generic):
+        return obj.item()
 
-if isinstance(obj, (list, tuple)):
-    return [
-        make_json_safe(value)
-        for value in obj
-    ]
+    if isinstance(obj, dict):
+        return {
+            key: make_json_safe(value)
+            for key, value in obj.items()
+        }
 
-return obj
+    if isinstance(obj, (list, tuple)):
+        return [
+            make_json_safe(value)
+            for value in obj
+        ]
 
-@app.get("/api/v1/health", response_model=HealthResponse)
+    return obj
+
+
+@app.get(
+    "/api/v1/health",
+    response_model=HealthResponse,
+)
 async def health_check():
-"""Health check endpoint."""
-return HealthResponse(
-status="healthy",
-version="1.0.0",
-pipeline_loaded=_pipeline is not None,
-)
+    """Health check endpoint."""
 
-@app.post("/api/v1/verify", response_model=VerifyResponse)
+    return HealthResponse(
+        status="healthy",
+        version="1.0.0",
+        pipeline_loaded=_pipeline is not None,
+    )
+
+
+@app.post(
+    "/api/v1/verify",
+    response_model=VerifyResponse,
+)
 async def verify_document(
-file: UploadFile = File(...),
-selfie_file: Optional[UploadFile] = File(None),
-skip_quality_gate: bool = False,
+    file: UploadFile = File(...),
+    selfie_file: Optional[UploadFile] = File(None),
+    skip_quality_gate: bool = False,
 ):
-"""Verify a document and optionally compare it with a selfie."""
+    """Verify a document and optionally compare it with a selfie."""
 
-logger.info(
-    f"Received verification request: "
-    f"document={file.filename}, "
-    f"selfie={selfie_file.filename if selfie_file else None}"
-)
+    logger.info(
+        f"Received verification request: "
+        f"document={file.filename}, "
+        f"selfie={selfie_file.filename if selfie_file else None}"
+    )
 
-# Read and decode document image
-file_bytes = await file.read()
-image = decode_upload(file_bytes)
+    # Read and decode document image
+    file_bytes = await file.read()
+    image = decode_upload(file_bytes)
 
-# Read and decode optional selfie image
-selfie_image = None
+    # Read and decode optional selfie image
+    selfie_image = None
 
-if selfie_file is not None:
-    selfie_bytes = await selfie_file.read()
-    selfie_image = decode_upload(selfie_bytes)
+    if selfie_file is not None:
+        selfie_bytes = await selfie_file.read()
+        selfie_image = decode_upload(selfie_bytes)
 
-# Process through pipeline
-pipeline = get_pipeline()
+    # Process through pipeline
+    pipeline = get_pipeline()
 
-result = pipeline.process(
-    image,
-    selfie_image=selfie_image,
-    skip_quality_gate=skip_quality_gate,
-    skip_ocr=True,
-)
+    result = pipeline.process(
+        image,
+        selfie_image=selfie_image,
+        skip_quality_gate=skip_quality_gate,
+        skip_ocr=False,
+    )
 
-data = make_json_safe(result.to_dict())
+    data = make_json_safe(result.to_dict())
 
-return VerifyResponse(**data)
+    return VerifyResponse(**data)
+
 
 @app.post("/api/v1/ela-only")
-async def ela_analysis(file: UploadFile = File(...)):
-"""Run only ELA tamper detection (no OCR) and return a base64 heatmap."""
-file_bytes = await file.read()
-image = decode_upload(file_bytes)
+async def ela_analysis(
+    file: UploadFile = File(...),
+):
+    """Run only ELA tamper detection (no OCR) and return a base64 heatmap."""
 
-pipeline = get_pipeline()
-result = pipeline.process(image, skip_ocr=True, skip_quality_gate=True)
+    file_bytes = await file.read()
+    image = decode_upload(file_bytes)
 
-response = {
-    "tamper_detection": make_json_safe(
-        result.ela_result.to_dict() if result.ela_result else None
-    ),
-}
+    pipeline = get_pipeline()
 
-if result.ela_result and result.ela_result.heatmap is not None:
-    response["heatmap_base64"] = encode_image_base64(
-        result.ela_result.heatmap
+    result = pipeline.process(
+        image,
+        skip_ocr=True,
+        skip_quality_gate=True,
     )
 
-if "ela_overlay" in result.images:
-    response["overlay_base64"] = encode_image_base64(
-        result.images["ela_overlay"]
-    )
+    response = {
+        "tamper_detection": make_json_safe(
+            result.ela_result.to_dict()
+            if result.ela_result
+            else None
+        ),
+    }
 
-return JSONResponse(content=response)
+    if (
+        result.ela_result
+        and result.ela_result.heatmap is not None
+    ):
+        response["heatmap_base64"] = encode_image_base64(
+            result.ela_result.heatmap
+        )
+
+    if "ela_overlay" in result.images:
+        response["overlay_base64"] = encode_image_base64(
+            result.images["ela_overlay"]
+        )
+
+    return JSONResponse(content=response)
+
 
 @app.post("/api/v1/batch")
-async def batch_verify(files: List[UploadFile] = File(...)):
-"""Batch verification of multiple document images."""
-logger.info(f"Received batch request: {len(files)} images")
+async def batch_verify(
+    files: List[UploadFile] = File(...),
+):
+    """Batch verification of multiple document images."""
 
-pipeline = get_pipeline()
-results = []
+    logger.info(
+        f"Received batch request: {len(files)} images"
+    )
 
-for file in files:
-    try:
-        file_bytes = await file.read()
-        image = decode_upload(file_bytes)
-        result = pipeline.process(image)
+    pipeline = get_pipeline()
+    results = []
 
-        results.append({
-            "filename": file.filename,
-            "result": make_json_safe(result.to_dict()),
-        })
+    for file in files:
+        try:
+            file_bytes = await file.read()
+            image = decode_upload(file_bytes)
 
-    except (ValueError, RuntimeError, cv2.error) as e:
-        results.append({
-            "filename": file.filename,
-            "error": str(e),
-        })
+            result = pipeline.process(image)
 
-return JSONResponse(
-    content={
-        "results": results,
-        "total": len(results),
-    }
-)
+            results.append(
+                {
+                    "filename": file.filename,
+                    "result": make_json_safe(
+                        result.to_dict()
+                    ),
+                }
+            )
+
+        except (
+            ValueError,
+            RuntimeError,
+            cv2.error,
+        ) as e:
+            results.append(
+                {
+                    "filename": file.filename,
+                    "error": str(e),
+                }
+            )
+
+    return JSONResponse(
+        content={
+            "results": results,
+            "total": len(results),
+        }
+    )
+
 
 @app.websocket("/ws/live-capture")
-async def live_capture(websocket: WebSocket):
-"""WebSocket endpoint for real-time camera quality feedback and smart capture."""
-await websocket.accept()
+async def live_capture(
+    websocket: WebSocket,
+):
+    """
+    WebSocket endpoint for real-time camera quality
+    feedback and smart capture.
+    """
 
-pipeline = get_pipeline()
-quality_gate = pipeline.quality_gate
+    await websocket.accept()
 
-logger.info("WebSocket live-capture session started")
+    pipeline = get_pipeline()
+    quality_gate = pipeline.quality_gate
 
-try:
-    while True:
-        data = await websocket.receive_text()
+    logger.info(
+        "WebSocket live-capture session started"
+    )
 
-        try:
-            img_bytes = base64.b64decode(data)
-            nparr = np.frombuffer(img_bytes, np.uint8)
-            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    try:
+        while True:
+            data = await websocket.receive_text()
 
-            if frame is None:
-                await websocket.send_json({
-                    "type": "error",
-                    "message": "Could not decode frame",
-                })
-                continue
+            try:
+                img_bytes = base64.b64decode(data)
 
-            # Quick quality check
-            report = quality_gate.evaluate(frame)
+                nparr = np.frombuffer(
+                    img_bytes,
+                    np.uint8,
+                )
 
-            if report.passed:
-                await websocket.send_json({
-                    "type": "ready",
-                    "message": "Quality OK — capturing...",
-                    "quality": make_json_safe(report.to_dict()),
-                })
+                frame = cv2.imdecode(
+                    nparr,
+                    cv2.IMREAD_COLOR,
+                )
 
-                result = pipeline.process(frame)
+                if frame is None:
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "message": "Could not decode frame",
+                        }
+                    )
+                    continue
 
-                await websocket.send_json({
-                    "type": "result",
-                    "data": make_json_safe(result.to_dict()),
-                })
+                # Quick quality check
+                report = quality_gate.evaluate(frame)
 
-            else:
-                await websocket.send_json({
-                    "type": "guidance",
-                    "quality": make_json_safe(report.to_dict()),
-                    "issues": report.issues,
-                })
+                if report.passed:
+                    await websocket.send_json(
+                        {
+                            "type": "ready",
+                            "message": "Quality OK — capturing...",
+                            "quality": make_json_safe(
+                                report.to_dict()
+                            ),
+                        }
+                    )
 
-        except Exception as e:
-            await websocket.send_json({
-                "type": "error",
-                "message": str(e),
-            })
+                    result = pipeline.process(frame)
 
-except WebSocketDisconnect:
-    logger.info("WebSocket live-capture session ended")
+                    await websocket.send_json(
+                        {
+                            "type": "result",
+                            "data": make_json_safe(
+                                result.to_dict()
+                            ),
+                        }
+                    )
 
-def start_server(host: str = "0.0.0.0", port: int = 8000):
-"""Start the API server."""
-import uvicorn
+                else:
+                    await websocket.send_json(
+                        {
+                            "type": "guidance",
+                            "quality": make_json_safe(
+                                report.to_dict()
+                            ),
+                            "issues": report.issues,
+                        }
+                    )
 
-uvicorn.run(app, host=host, port=port)
+            except Exception as e:
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "message": str(e),
+                    }
+                )
 
-if name == "main":
-start_server()
+    except WebSocketDisconnect:
+        logger.info(
+            "WebSocket live-capture session ended"
+        )
+
+
+def start_server(
+    host: str = "0.0.0.0",
+    port: int = 8000,
+):
+    """Start the API server."""
+
+    import uvicorn
+
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+    )
+
+
+if __name__ == "__main__":
+    start_server()
