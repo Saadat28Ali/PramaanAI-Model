@@ -258,7 +258,7 @@ async def verify_document(
         image,
         selfie_image=selfie_image,
         skip_quality_gate=skip_quality_gate,
-        skip_ocr=False,
+        skip_ocr=True,
     )
 
     data = make_json_safe(result.to_dict())
