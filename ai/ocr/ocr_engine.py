@@ -1,10 +1,12 @@
-"""EasyOCR text extraction for document processing."""
+"""Lightweight EasyOCR text extraction for document processing."""
 
 import cv2
 import numpy as np
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
+
 from loguru import logger
 
 from ..config import OCRConfig
@@ -13,6 +15,7 @@ from ..config import OCRConfig
 @dataclass
 class OCRBox:
     """A single detected text region."""
+
     text: str
     confidence: float
     bbox: List[List[int]]
@@ -30,6 +33,7 @@ class OCRBox:
 @dataclass
 class OCRResult:
     """Complete OCR result for an image."""
+
     boxes: List[OCRBox]
     full_text: str
     avg_confidence: float
@@ -55,35 +59,95 @@ class BaseOCREngine(ABC):
 
 
 class EasyOCREngine(BaseOCREngine):
-    """EasyOCR engine for document text extraction."""
+    """
+    Lightweight EasyOCR engine for document text extraction.
+
+    The OCR model is loaded lazily and the input image is resized
+    before OCR to reduce memory usage on resource-constrained
+    deployments such as Render.
+    """
 
     def __init__(self, config: OCRConfig | None = None) -> None:
         self.config = config or OCRConfig()
         self._engine = None
 
+        # Maximum dimension sent to EasyOCR.
+        # This prevents very large document images from causing
+        # excessive memory usage.
+        self.max_dimension = 1600
+
+        # Ignore very low-confidence OCR results.
+        self.min_confidence = 0.20
+
+        # Ignore extremely short OCR detections.
+        self.min_text_length = 2
+
     def _load_engine(self):
-        """Lazy-load EasyOCR to avoid unnecessary startup overhead."""
-        if self._engine is None:
-            try:
-                import easyocr
+        """Lazy-load a lightweight CPU EasyOCR engine."""
 
-                self._engine = easyocr.Reader(
-                    self.config.languages,
-                    gpu=self.config.use_gpu,
-                )
+        if self._engine is not None:
+            return
 
-                logger.info("EasyOCR engine loaded successfully")
+        try:
+            import easyocr
 
-            except ImportError:
-                logger.error(
-                    "EasyOCR not installed. "
-                    "Install with: pip install easyocr"
-                )
-                raise
+            logger.info("Loading lightweight EasyOCR engine...")
+
+            self._engine = easyocr.Reader(
+                self.config.languages,
+                gpu=False,
+                quantize=True,
+                verbose=False,
+            )
+
+            logger.info("EasyOCR engine loaded successfully")
+
+        except ImportError:
+            logger.error(
+                "EasyOCR not installed. "
+                "Install with: pip install easyocr"
+            )
+            raise
+
+    def _prepare_image(self, image: np.ndarray) -> np.ndarray:
+        """
+        Resize the image before OCR to reduce memory consumption.
+
+        The original image is preserved outside this method.
+        """
+
+        height, width = image.shape[:2]
+
+        largest_dimension = max(height, width)
+
+        if largest_dimension <= self.max_dimension:
+            return image
+
+        scale = self.max_dimension / float(largest_dimension)
+
+        new_width = max(1, int(width * scale))
+        new_height = max(1, int(height * scale))
+
+        logger.info(
+            f"Resizing OCR image: "
+            f"{width}x{height} -> "
+            f"{new_width}x{new_height}"
+        )
+
+        return cv2.resize(
+            image,
+            (new_width, new_height),
+            interpolation=cv2.INTER_AREA,
+        )
 
     def extract(self, image: np.ndarray) -> OCRResult:
-        """Run EasyOCR on the image."""
+        """Run lightweight EasyOCR on the supplied image."""
+
         self._load_engine()
+
+        # --------------------------------------------------
+        # Validate image
+        # --------------------------------------------------
 
         if image is None or image.size == 0:
             logger.warning("Empty image supplied to EasyOCR")
@@ -95,42 +159,104 @@ class EasyOCREngine(BaseOCREngine):
                 engine_used="easyocr",
             )
 
-        results = self._engine.readtext(image)
+        # --------------------------------------------------
+        # Prepare smaller OCR image
+        # --------------------------------------------------
 
-        boxes = []
+        image_for_ocr = self._prepare_image(image)
+
+        logger.info(
+            f"EasyOCR input size: "
+            f"{image_for_ocr.shape[1]}x"
+            f"{image_for_ocr.shape[0]}"
+        )
+
+        # --------------------------------------------------
+        # Run OCR
+        # --------------------------------------------------
+
+        try:
+            results = self._engine.readtext(
+                image_for_ocr,
+                detail=1,
+                paragraph=False,
+                batch_size=1,
+                mag_ratio=1.0,
+            )
+
+        except Exception as e:
+            logger.error(f"EasyOCR inference failed: {e}")
+            raise
+
+        # --------------------------------------------------
+        # Convert OCR results
+        # --------------------------------------------------
+
+        boxes: List[OCRBox] = []
 
         for bbox, text, confidence in results:
-            # EasyOCR returns:
-            # [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
+
+            text = str(text).strip()
+            confidence = float(confidence)
+
+            # Ignore empty / extremely short detections.
+            if len(text) < self.min_text_length:
+                continue
+
+            # Ignore very low-confidence detections.
+            if confidence < self.min_confidence:
+                continue
 
             bbox_int = [
-                [int(point[0]), int(point[1])]
+                [
+                    int(point[0]),
+                    int(point[1]),
+                ]
                 for point in bbox
             ]
 
             boxes.append(
                 OCRBox(
-                    text=str(text),
-                    confidence=float(confidence),
+                    text=text,
+                    confidence=confidence,
                     bbox=bbox_int,
                     engine="easyocr",
                 )
             )
 
+        # --------------------------------------------------
+        # Build combined text
+        # --------------------------------------------------
+
         full_text = " ".join(
-            box.text for box in boxes
+            box.text
+            for box in boxes
         )
 
-        avg_confidence = (
-            float(np.mean([box.confidence for box in boxes]))
-            if boxes
-            else 0.0
-        )
+        # --------------------------------------------------
+        # Calculate average confidence
+        # --------------------------------------------------
+
+        if boxes:
+            avg_confidence = float(
+                np.mean(
+                    [
+                        box.confidence
+                        for box in boxes
+                    ]
+                )
+            )
+        else:
+            avg_confidence = 0.0
 
         logger.info(
-            f"EasyOCR: {len(boxes)} text regions, "
+            f"EasyOCR: {len(boxes)} relevant text regions, "
             f"avg confidence: {avg_confidence:.3f}"
         )
+
+        # --------------------------------------------------
+        # Return structured OCR result
+        # --------------------------------------------------
 
         return OCRResult(
             boxes=boxes,
@@ -141,7 +267,12 @@ class EasyOCREngine(BaseOCREngine):
 
 
 class OCREngineManager:
-    """Manages EasyOCR as the single OCR engine."""
+    """
+    Manages EasyOCR as the single OCR engine.
+
+    The engine itself is created lazily so that the OCR model
+    is not loaded unless OCR is actually requested.
+    """
 
     def __init__(self, config: OCRConfig | None = None) -> None:
         self.config = config or OCRConfig()
@@ -149,6 +280,7 @@ class OCREngineManager:
 
     def _get_engine(self) -> EasyOCREngine:
         """Get or create the EasyOCR engine."""
+
         if self._engine is None:
             self._engine = EasyOCREngine(self.config)
 
@@ -182,6 +314,7 @@ class OCREngineManager:
         EasyOCR is now the only OCR engine, so both returned
         results are the same OCR result.
         """
+
         result = self.extract(image)
 
         return result, result
@@ -193,11 +326,12 @@ def draw_ocr_boxes(
     color: Tuple[int, int, int] = (0, 255, 0),
     thickness: int = 2,
 ) -> np.ndarray:
-    """Draw OCR bounding boxes and text on the image for visualization."""
+    """Draw OCR bounding boxes and text on the image."""
 
     vis = image.copy()
 
     for box in boxes:
+
         pts = np.array(
             box.bbox,
             dtype=np.int32,
@@ -213,10 +347,16 @@ def draw_ocr_boxes(
 
         text_pos = (
             int(pts[0][0]),
-            max(0, int(pts[0][1]) - 5),
+            max(
+                0,
+                int(pts[0][1]) - 5,
+            ),
         )
 
-        label = f"{box.text} ({box.confidence:.2f})"
+        label = (
+            f"{box.text} "
+            f"({box.confidence:.2f})"
+        )
 
         cv2.putText(
             vis,
