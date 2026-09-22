@@ -60,6 +60,45 @@ class PipelineResult:
     def total_time_ms(self) -> float:
         return sum(self.timings.values())
 
+    def _get_final_tamper_decision(self) -> tuple[bool, List[str]]:
+        """Combine ELA, Copy-Move, and DL tamper detection."""
+
+        reasons: List[str] = []
+        is_tampered = False
+
+        # ELA
+        if self.ela_result is not None:
+            if bool(self.ela_result.is_tampered):
+                is_tampered = True
+                reasons.append("ELA tamper detection")
+
+        # Copy-Move
+        if self.copymove_result:
+            if bool(self.copymove_result.get("is_copymove", False)):
+                is_tampered = True
+                reasons.append("Copy-move detection")
+
+        # Deep-learning tamper classifier
+        if self.dl_tamper_result:
+            if isinstance(self.dl_tamper_result, dict):
+
+                if "is_tampered" in self.dl_tamper_result:
+                    dl_flag = self.dl_tamper_result.get("is_tampered")
+
+                elif "tampered" in self.dl_tamper_result:
+                    dl_flag = self.dl_tamper_result.get("tampered")
+
+                else:
+                    dl_flag = False
+
+                if dl_flag is True:
+                    is_tampered = True
+                    reasons.append(
+                        "Deep-learning tamper detection"
+                    )
+
+        return is_tampered, reasons
+
     def to_dict(self) -> dict:
         """Convert to a JSON-serializable dictionary."""
         result = {
@@ -80,7 +119,28 @@ class PipelineResult:
             result["glare"] = self.glare_result.to_dict()
 
         if self.ela_result:
-            result["tamper_detection"] = self.ela_result.to_dict()
+            tamper_result = self.ela_result.to_dict()
+
+            final_is_tampered, reasons = (
+                self._get_final_tamper_decision()
+            )
+
+            tamper_result["is_tampered"] = final_is_tampered
+
+            if final_is_tampered:
+                tamper_result["message"] = (
+                    "Tampering detected by forensic analysis."
+                )
+            else:
+                tamper_result["message"] = (
+                    f"No tampering detected "
+                    f"(score: "
+                    f"{self.ela_result.anomaly_score:.3f})."
+                )
+
+            tamper_result["detection_reasons"] = reasons
+
+            result["tamper_detection"] = tamper_result
 
         if self.dl_tamper_result:
             result["dl_tamper"] = self.dl_tamper_result
