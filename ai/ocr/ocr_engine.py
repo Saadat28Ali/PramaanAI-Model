@@ -1,4 +1,4 @@
-"""Lightweight EasyOCR text extraction for document processing."""
+"""Lightweight RapidOCR text extraction for document processing."""
 
 import cv2
 import numpy as np
@@ -10,6 +10,11 @@ from typing import List, Optional, Tuple
 from loguru import logger
 
 from ..config import OCRConfig
+
+
+# ============================================================
+# OCR DATA STRUCTURES
+# ============================================================
 
 
 @dataclass
@@ -49,6 +54,11 @@ class OCRResult:
         }
 
 
+# ============================================================
+# BASE OCR ENGINE
+# ============================================================
+
+
 class BaseOCREngine(ABC):
     """Abstract base class for OCR engines."""
 
@@ -58,186 +68,474 @@ class BaseOCREngine(ABC):
         pass
 
 
-class EasyOCREngine(BaseOCREngine):
-    """
-    Lightweight EasyOCR engine for document text extraction.
+# ============================================================
+# RAPIDOCR ENGINE
+# ============================================================
 
-    The OCR model is loaded lazily and the input image is resized
-    before OCR to reduce memory usage on resource-constrained
-    deployments such as Render.
+
+class RapidOCREngine(BaseOCREngine):
+    """
+    Lightweight RapidOCR engine for document text extraction.
+
+    Uses ONNX Runtime instead of PyTorch/PaddlePaddle.
+
+    The OCR engine is initialized lazily so the models are only
+    loaded when OCR is actually requested.
     """
 
-    def __init__(self, config: OCRConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: OCRConfig | None = None,
+    ) -> None:
+
         self.config = config or OCRConfig()
+
         self._engine = None
 
-        # Maximum dimension sent to EasyOCR.
-        # This prevents very large document images from causing
-        # excessive memory usage.
+        # Maximum dimension sent to OCR.
+        #
+        # This is intentionally kept at 1600 to avoid sending
+        # unnecessarily large document images into the OCR model.
         self.max_dimension = 1600
 
-        # Ignore very low-confidence OCR results.
+        # Ignore extremely low-confidence detections.
         self.min_confidence = 0.20
 
-        # Ignore extremely short OCR detections.
+        # Ignore extremely short detections.
         self.min_text_length = 2
 
-    def _load_engine(self):
-        """Lazy-load a lightweight CPU EasyOCR engine."""
+    # ========================================================
+    # LOAD RAPIDOCR
+    # ========================================================
+
+    def _load_engine(self) -> None:
+        """Lazy-load RapidOCR."""
 
         if self._engine is not None:
             return
 
         try:
-            import easyocr
 
-            logger.info("Loading lightweight EasyOCR engine...")
+            from rapidocr import RapidOCR
 
-            self._engine = easyocr.Reader(
-                self.config.languages,
-                gpu=False,
-                quantize=True,
-                verbose=False,
+            logger.info(
+                "Loading RapidOCR engine..."
             )
 
-            logger.info("EasyOCR engine loaded successfully")
+            self._engine = RapidOCR()
+
+            logger.info(
+                "RapidOCR engine loaded successfully"
+            )
 
         except ImportError:
+
             logger.error(
-                "EasyOCR not installed. "
-                "Install with: pip install easyocr"
+                "RapidOCR is not installed. "
+                "Install with: "
+                "pip install rapidocr onnxruntime"
             )
+
             raise
 
-    def _prepare_image(self, image: np.ndarray) -> np.ndarray:
-        """
-        Resize the image before OCR to reduce memory consumption.
+        except Exception as e:
 
-        The original image is preserved outside this method.
+            logger.error(
+                f"RapidOCR initialization failed: {e}"
+            )
+
+            raise
+
+    # ========================================================
+    # IMAGE PREPARATION
+    # ========================================================
+
+    def _prepare_image(
+        self,
+        image: np.ndarray,
+    ) -> Tuple[np.ndarray, float]:
+        """
+        Resize image before OCR.
+
+        Returns:
+            prepared_image,
+            scale_used
         """
 
         height, width = image.shape[:2]
 
-        largest_dimension = max(height, width)
-
-        if largest_dimension <= self.max_dimension:
-            return image
-
-        scale = self.max_dimension / float(largest_dimension)
-
-        new_width = max(1, int(width * scale))
-        new_height = max(1, int(height * scale))
-
-        logger.info(
-            f"Resizing OCR image: "
-            f"{width}x{height} -> "
-            f"{new_width}x{new_height}"
+        largest_dimension = max(
+            height,
+            width,
         )
 
-        return cv2.resize(
-            image,
-            (new_width, new_height),
-            interpolation=cv2.INTER_AREA,
-        )
+        scale = 1.0
 
-    def extract(self, image: np.ndarray) -> OCRResult:
-        """Run lightweight EasyOCR on the supplied image."""
+        if largest_dimension > self.max_dimension:
+
+            scale = (
+                self.max_dimension
+                / float(largest_dimension)
+            )
+
+            new_width = max(
+                1,
+                int(width * scale),
+            )
+
+            new_height = max(
+                1,
+                int(height * scale),
+            )
+
+            logger.info(
+                f"Resizing OCR image: "
+                f"{width}x{height} -> "
+                f"{new_width}x{new_height}"
+            )
+
+            image = cv2.resize(
+                image,
+                (
+                    new_width,
+                    new_height,
+                ),
+                interpolation=cv2.INTER_AREA,
+            )
+
+        return image, scale
+
+    # ========================================================
+    # BBOX CONVERSION
+    # ========================================================
+
+    def _convert_bbox(
+        self,
+        bbox,
+        scale: float,
+    ) -> List[List[int]]:
+        """
+        Convert RapidOCR polygon coordinates back to the
+        original image coordinate system.
+
+        RapidOCR normally returns:
+
+        [
+            [x1, y1],
+            [x2, y2],
+            [x3, y3],
+            [x4, y4]
+        ]
+        """
+
+        if scale <= 0:
+            scale = 1.0
+
+        converted = []
+
+        for point in bbox:
+
+            x = int(
+                float(point[0])
+                / scale
+            )
+
+            y = int(
+                float(point[1])
+                / scale
+            )
+
+            converted.append(
+                [x, y]
+            )
+
+        return converted
+
+    # ========================================================
+    # OCR EXTRACTION
+    # ========================================================
+
+    def extract(
+        self,
+        image: np.ndarray,
+    ) -> OCRResult:
+        """Run RapidOCR on the supplied image."""
 
         self._load_engine()
 
-        # --------------------------------------------------
-        # Validate image
-        # --------------------------------------------------
+        # ====================================================
+        # VALIDATE IMAGE
+        # ====================================================
 
         if image is None or image.size == 0:
-            logger.warning("Empty image supplied to EasyOCR")
+
+            logger.warning(
+                "Empty image supplied to RapidOCR"
+            )
 
             return OCRResult(
                 boxes=[],
                 full_text="",
                 avg_confidence=0.0,
-                engine_used="easyocr",
+                engine_used="rapidocr",
             )
 
-        # --------------------------------------------------
-        # Prepare smaller OCR image
-        # --------------------------------------------------
+        # ====================================================
+        # PREPARE IMAGE
+        # ====================================================
 
-        image_for_ocr = self._prepare_image(image)
+        image_for_ocr, scale = self._prepare_image(
+            image
+        )
 
         logger.info(
-            f"EasyOCR input size: "
+            f"RapidOCR input size: "
             f"{image_for_ocr.shape[1]}x"
             f"{image_for_ocr.shape[0]}"
         )
 
-        # --------------------------------------------------
-        # Run OCR
-        # --------------------------------------------------
+        # ====================================================
+        # RUN OCR
+        # ====================================================
 
         try:
-            results = self._engine.readtext(
-                image_for_ocr,
-                detail=1,
-                paragraph=False,
-                batch_size=1,
-                mag_ratio=1.0,
+
+            result = self._engine(
+                image_for_ocr
             )
 
         except Exception as e:
-            logger.error(f"EasyOCR inference failed: {e}")
+
+            logger.error(
+                f"RapidOCR inference failed: {e}"
+            )
+
             raise
 
-        # --------------------------------------------------
-        # Convert OCR results
-        # --------------------------------------------------
+        # ====================================================
+        # HANDLE EMPTY RESULT
+        # ====================================================
+
+        if result is None:
+
+            logger.warning(
+                "RapidOCR returned no result"
+            )
+
+            return OCRResult(
+                boxes=[],
+                full_text="",
+                avg_confidence=0.0,
+                engine_used="rapidocr",
+            )
+
+        # ====================================================
+        # RAPIDOCR RESULT FORMAT
+        # ====================================================
+        #
+        # Depending on the RapidOCR version, result may
+        # expose:
+        #
+        #   result.boxes
+        #   result.txts
+        #   result.scores
+        #
+        # or behave like:
+        #
+        #   [boxes, texts, scores]
+        #
+        # We handle both forms.
+        # ====================================================
+
+        boxes_raw = None
+        texts_raw = None
+        scores_raw = None
+
+        # ----------------------------------------------------
+        # New/result-object style
+        # ----------------------------------------------------
+
+        if hasattr(result, "boxes"):
+
+            boxes_raw = result.boxes
+
+        elif hasattr(result, "polys"):
+
+            boxes_raw = result.polys
+
+        # ----------------------------------------------------
+        # Text
+        # ----------------------------------------------------
+
+        if hasattr(result, "txts"):
+
+            texts_raw = result.txts
+
+        elif hasattr(result, "texts"):
+
+            texts_raw = result.texts
+
+        # ----------------------------------------------------
+        # Scores
+        # ----------------------------------------------------
+
+        if hasattr(result, "scores"):
+
+            scores_raw = result.scores
+
+        # ----------------------------------------------------
+        # Tuple/list style
+        # ----------------------------------------------------
+
+        if (
+            boxes_raw is None
+            and isinstance(result, (tuple, list))
+            and len(result) >= 3
+        ):
+
+            boxes_raw = result[0]
+            texts_raw = result[1]
+            scores_raw = result[2]
+
+        # ====================================================
+        # SAFETY CHECK
+        # ====================================================
+
+        if (
+            boxes_raw is None
+            or texts_raw is None
+            or scores_raw is None
+        ):
+
+            logger.warning(
+                "RapidOCR returned an unexpected result format"
+            )
+
+            logger.debug(
+                f"RapidOCR result type: "
+                f"{type(result)}"
+            )
+
+            return OCRResult(
+                boxes=[],
+                full_text="",
+                avg_confidence=0.0,
+                engine_used="rapidocr",
+            )
+
+        # ====================================================
+        # CONVERT RESULTS
+        # ====================================================
 
         boxes: List[OCRBox] = []
 
-        for bbox, text, confidence in results:
+        for bbox, text, confidence in zip(
+            boxes_raw,
+            texts_raw,
+            scores_raw,
+        ):
+
+            # ------------------------------------------------
+            # Text
+            # ------------------------------------------------
+
+            if text is None:
+                continue
 
             text = str(text).strip()
-            confidence = float(confidence)
 
-            # Ignore empty / extremely short detections.
+            if not text:
+                continue
+
             if len(text) < self.min_text_length:
                 continue
 
-            # Ignore very low-confidence detections.
+            # ------------------------------------------------
+            # Confidence
+            # ------------------------------------------------
+
+            try:
+
+                confidence = float(
+                    confidence
+                )
+
+            except (
+                ValueError,
+                TypeError,
+            ):
+
+                continue
+
             if confidence < self.min_confidence:
                 continue
 
-            bbox_int = [
-                [
-                    int(point[0]),
-                    int(point[1]),
-                ]
-                for point in bbox
-            ]
+            # ------------------------------------------------
+            # Bounding box
+            # ------------------------------------------------
+
+            try:
+
+                bbox_converted = (
+                    self._convert_bbox(
+                        bbox,
+                        scale,
+                    )
+                )
+
+            except Exception as e:
+
+                logger.warning(
+                    f"Could not convert OCR bbox: {e}"
+                )
+
+                continue
+
+            # ------------------------------------------------
+            # Store
+            # ------------------------------------------------
 
             boxes.append(
                 OCRBox(
                     text=text,
                     confidence=confidence,
-                    bbox=bbox_int,
-                    engine="easyocr",
+                    bbox=bbox_converted,
+                    engine="rapidocr",
                 )
             )
 
-        # --------------------------------------------------
-        # Build combined text
-        # --------------------------------------------------
+        # ====================================================
+        # SORT BOXES
+        # ====================================================
+        #
+        # Top -> bottom
+        # Left -> right
+        #
+        # This keeps full_text in a sensible document order.
+        # ====================================================
+
+        boxes.sort(
+            key=lambda box: (
+                box.bbox[0][1],
+                box.bbox[0][0],
+            )
+        )
+
+        # ====================================================
+        # BUILD FULL TEXT
+        # ====================================================
 
         full_text = " ".join(
             box.text
             for box in boxes
         )
 
-        # --------------------------------------------------
-        # Calculate average confidence
-        # --------------------------------------------------
+        # ====================================================
+        # AVERAGE CONFIDENCE
+        # ====================================================
 
         if boxes:
+
             avg_confidence = float(
                 np.mean(
                     [
@@ -246,84 +544,152 @@ class EasyOCREngine(BaseOCREngine):
                     ]
                 )
             )
+
         else:
+
             avg_confidence = 0.0
 
+        # ====================================================
+        # LOG
+        # ====================================================
+
         logger.info(
-            f"EasyOCR: {len(boxes)} relevant text regions, "
-            f"avg confidence: {avg_confidence:.3f}"
+            f"RapidOCR: "
+            f"{len(boxes)} relevant text regions, "
+            f"avg confidence: "
+            f"{avg_confidence:.3f}"
         )
 
-        # --------------------------------------------------
-        # Return structured OCR result
-        # --------------------------------------------------
+        logger.info(
+            f"RapidOCR extracted text: "
+            f"{full_text[:500]}"
+        )
+
+        # ====================================================
+        # RETURN
+        # ====================================================
 
         return OCRResult(
             boxes=boxes,
             full_text=full_text,
             avg_confidence=avg_confidence,
-            engine_used="easyocr",
+            engine_used="rapidocr",
         )
+
+
+# ============================================================
+# OCR ENGINE MANAGER
+# ============================================================
 
 
 class OCREngineManager:
     """
-    Manages EasyOCR as the single OCR engine.
+    Manages RapidOCR as the single OCR engine.
 
-    The engine itself is created lazily so that the OCR model
-    is not loaded unless OCR is actually requested.
+    The engine is created lazily so OCR models are not loaded
+    unless OCR is actually requested.
     """
 
-    def __init__(self, config: OCRConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: OCRConfig | None = None,
+    ) -> None:
+
         self.config = config or OCRConfig()
+
         self._engine = None
 
-    def _get_engine(self) -> EasyOCREngine:
-        """Get or create the EasyOCR engine."""
+    # ========================================================
+    # GET ENGINE
+    # ========================================================
+
+    def _get_engine(
+        self,
+    ) -> RapidOCREngine:
 
         if self._engine is None:
-            self._engine = EasyOCREngine(self.config)
+
+            self._engine = (
+                RapidOCREngine(
+                    self.config
+                )
+            )
 
         return self._engine
 
-    def extract(self, image: np.ndarray) -> OCRResult:
-        """Extract text using EasyOCR only."""
+    # ========================================================
+    # EXTRACT
+    # ========================================================
+
+    def extract(
+        self,
+        image: np.ndarray,
+    ) -> OCRResult:
+        """Extract text using RapidOCR."""
 
         engine = self._get_engine()
 
         try:
-            return engine.extract(image)
 
-        except (RuntimeError, ValueError, OSError) as e:
-            logger.error(f"EasyOCR failed: {e}")
+            return engine.extract(
+                image
+            )
+
+        except (
+            RuntimeError,
+            ValueError,
+            OSError,
+        ) as e:
+
+            logger.error(
+                f"RapidOCR failed: {e}"
+            )
 
             return OCRResult(
                 boxes=[],
                 full_text="",
                 avg_confidence=0.0,
-                engine_used="easyocr",
+                engine_used="rapidocr",
             )
+
+    # ========================================================
+    # BACKWARD COMPATIBILITY
+    # ========================================================
 
     def extract_with_both(
         self,
         image: np.ndarray,
-    ) -> Tuple[OCRResult, OCRResult]:
+    ) -> Tuple[
+        OCRResult,
+        OCRResult,
+    ]:
         """
         Kept for backward compatibility.
 
-        EasyOCR is now the only OCR engine, so both returned
+        RapidOCR is now the only OCR engine, so both returned
         results are the same OCR result.
         """
 
-        result = self.extract(image)
+        result = self.extract(
+            image
+        )
 
         return result, result
+
+
+# ============================================================
+# OCR VISUALIZATION
+# ============================================================
 
 
 def draw_ocr_boxes(
     image: np.ndarray,
     boxes: List[OCRBox],
-    color: Tuple[int, int, int] = (0, 255, 0),
+    color: Tuple[int, int, int] = (
+        0,
+        255,
+        0,
+    ),
     thickness: int = 2,
 ) -> np.ndarray:
     """Draw OCR bounding boxes and text on the image."""
