@@ -44,7 +44,7 @@ class ParsedDocument:
 
 # Indian Aadhaar Card
 AADHAAR_PATTERNS = {
-    "aadhaar_number": r"(?<![/\-\.])\b(\d{4}\s\d{4}\s\d{4})\b",
+    "aadhaar_number": r"(?<![/\-\.])\b(\d{4}\s*\d{4}\s*\d{4})\b",
     "dob": r"\b(?:DOB|Date of Birth|Year of Birth)[:\s]*(\d{2}[/\-\.]\d{2}[/\-\.]\d{4})\b",
     "gender": r"\b(MALE|FEMALE|male|female|Male|Female)\b",
     "vid": r"\b(?:VID)[:\s]*(\d{4}\s?\d{4}\s?\d{4}\s?\d{4})\b",
@@ -123,7 +123,7 @@ class FieldParser:
         full_text = ocr_result.full_text
         boxes = ocr_result.boxes
 
-        doc_type = self._detect_document_type(full_text)
+        doc_type = self._detect_document_type(full_text, boxes)
 
         logger.info(
             f"Detected document type: {doc_type}"
@@ -149,6 +149,13 @@ class FieldParser:
         for key, value in generic_fields.items():
             if key not in fields:
                 fields[key] = value
+
+        # Aadhaar number can be split across OCR boxes, so recover it
+        # independently of the full-text regex.
+        if doc_type == "aadhaar" and "aadhaar_number" not in fields:
+            aadhaar_field = self._detect_aadhaar_number_from_boxes(boxes)
+            if aadhaar_field:
+                fields["aadhaar_number"] = aadhaar_field
 
         if "name" not in fields:
             name_field = self._extract_name_spatial(boxes)
@@ -186,15 +193,15 @@ class FieldParser:
             unmatched_text=unmatched,
         )
 
-    def _detect_document_type(self, text: str) -> str:
+    def _detect_document_type(self, text: str, boxes: Optional[List[OCRBox]] = None) -> str:
         """
-        Detect document type using OCR keywords and
-        document-specific patterns.
+        Detect document type using OCR keywords plus structural evidence.
 
-        This is intentionally lightweight and does not
-        perform another OCR operation.
+        Important for Tesseract:
+        AADHAAR is often read incorrectly (for example as fragments such as
+        "ERNMEN IND"), so the literal word AADHAAR is not required.
         """
-
+        boxes = boxes or []
         text_lower = text.lower()
 
         scores = {
@@ -204,69 +211,29 @@ class FieldParser:
             "passport": 0,
         }
 
-        # --------------------------------------------------
-        # 1. Normal keyword matching
-        # --------------------------------------------------
-
+        # Normal keyword matching.
         for doc_type, keywords in DOC_TYPE_KEYWORDS.items():
             for keyword in keywords:
                 if keyword in text_lower:
                     scores[doc_type] += 1
 
-        # --------------------------------------------------
-        # 2. Aadhaar-specific OCR-tolerant detection
-        # --------------------------------------------------
+        # Strong Aadhaar-specific evidence.
+        scores["aadhaar"] += self._aadhaar_evidence(text, boxes)
 
-        # EasyOCR can misread "AADHAAR" as:
-        # AADH_, AADH, AADHA, AADHA_ etc.
-        #
-        # Examples matched:
-        #   aadhaar
-        #   aadh
-        #   aadh_
-        #   aadha
-        if re.search(r"\baadh[a-z_]*\b", text_lower):
-            scores["aadhaar"] += 2
-
-        # Aadhaar number consists of 12 digits and OCR may
-        # separate them using spaces.
-        if re.search(
-            r"(?<!\d)\d{4}\s*\d{4}\s*\d{4}(?!\d)",
-            text,
-        ):
-            scores["aadhaar"] += 3
-
-        # --------------------------------------------------
-        # 3. PAN-specific detection
-        # --------------------------------------------------
-
-        if re.search(
-            r"\b[A-Z]{5}\d{4}[A-Z]\b",
-            text.upper(),
-        ):
+        # PAN-specific detection.
+        if re.search(r"\b[A-Z]{5}\d{4}[A-Z]\b", text.upper()):
             scores["pan"] += 4
 
-        # --------------------------------------------------
-        # 4. Passport-specific detection
-        # --------------------------------------------------
-
+        # Passport-specific detection.
         if "passport" in text_lower:
             scores["passport"] += 4
 
-        # --------------------------------------------------
-        # 5. Driving-license detection
-        # --------------------------------------------------
-
+        # Driving-license detection.
         if re.search(
-            r"\b(driver|driving|license|licence|"
-            r"motor vehicle|dmv)\b",
+            r"\b(driver|driving|license|licence|motor vehicle|dmv)\b",
             text_lower,
         ):
             scores["drivers_license"] += 2
-
-        # --------------------------------------------------
-        # 6. Select strongest document type
-        # --------------------------------------------------
 
         valid_scores = {
             doc_type: score
@@ -277,10 +244,135 @@ class FieldParser:
         if not valid_scores:
             return "unknown"
 
-        return max(
-            valid_scores,
-            key=valid_scores.get,
+        # Aadhaar needs enough combined evidence to avoid false positives.
+        # Other document types retain the original lightweight behavior.
+        if scores["aadhaar"] >= 5:
+            return "aadhaar"
+
+        # If Aadhaar evidence is weak, don't let a single weak signal classify it.
+        strongest = max(valid_scores.values())
+        candidates = [
+            doc_type for doc_type, score in valid_scores.items()
+            if score == strongest
+        ]
+
+        if len(candidates) == 1:
+            return candidates[0]
+
+        return "unknown"
+
+    def _aadhaar_evidence(self, text: str, boxes: List[OCRBox]) -> int:
+        """
+        Build lightweight Aadhaar evidence from OCR text + OCR boxes.
+
+        Tesseract may miss or garble the word AADHAAR, so detection uses
+        multiple independent signals instead of depending on that keyword.
+        """
+        score = 0
+        text_lower = text.lower()
+
+        # Strong explicit signals.
+        if "aadhaar" in text_lower:
+            score += 5
+        if "uidai" in text_lower:
+            score += 5
+        if "unique identification" in text_lower:
+            score += 4
+
+        # OCR-tolerant Aadhaar header fragments.
+        if re.search(r"\baadh[a-z_]*\b", text_lower):
+            score += 2
+
+        # Clean 12-digit number in OCR text.
+        if re.search(r"(?<!\d)\d{12}(?!\d)", re.sub(r"\D", "", text)):
+            score += 5
+
+        # Look for split numeric OCR boxes which together form 12 digits.
+        numeric_groups = []
+        for box in boxes:
+            digits = re.sub(r"\D", "", box.text)
+            if 2 <= len(digits) <= 5:
+                numeric_groups.append((box, digits))
+
+        for i in range(len(numeric_groups)):
+            combined = ""
+            for j in range(i, min(i + 4, len(numeric_groups))):
+                combined += numeric_groups[j][1]
+                if len(combined) == 12:
+                    score += 5
+                    break
+                if len(combined) > 12:
+                    break
+
+        # Supporting signals only.
+        if re.search(r"\b(?:male|female)\b", text_lower):
+            score += 1
+
+        if re.search(
+            r"\b(?:dob|date of birth|year of birth)\b|"
+            r"\b\d{1,2}[/\-.]\d{1,2}[/\-.]\d{4}\b",
+            text_lower,
+        ):
+            score += 1
+
+        indian_terms = (
+            "india", "delhi", "mumbai", "gurgaon", "gurugram",
+            "noida", "bangalore", "bengaluru", "pune", "jaipur",
+            "uttar pradesh", "haryana", "rajasthan", "maharashtra"
         )
+        if any(term in text_lower for term in indian_terms):
+            score += 1
+
+        return score
+
+    def _detect_aadhaar_number_from_boxes(
+        self,
+        boxes: List[OCRBox],
+    ) -> Optional[DocumentField]:
+        """
+        Recover a likely Aadhaar number when Tesseract splits it into boxes.
+        Only exactly 12 numeric digits are accepted.
+        """
+        if not boxes:
+            return None
+
+        numeric = []
+        for box in boxes:
+            digits = re.sub(r"\D", "", box.text.strip())
+
+            if 2 <= len(digits) <= 5:
+                numeric.append((box, digits))
+
+        for i in range(len(numeric)):
+            parts = []
+            confidences = []
+
+            for j in range(i, min(i + 4, len(numeric))):
+                parts.append(numeric[j][1])
+                confidences.append(numeric[j][0].confidence)
+
+                candidate = "".join(parts)
+
+                if len(candidate) == 12:
+                    value = (
+                        candidate[:4] + " " +
+                        candidate[4:8] + " " +
+                        candidate[8:12]
+                    )
+
+                    confidence = sum(confidences) / len(confidences)
+
+                    return DocumentField(
+                        field_name="aadhaar_number",
+                        value=value,
+                        confidence=confidence,
+                        source_box=numeric[i][0],
+                    )
+
+                if len(candidate) > 12:
+                    break
+
+        return None
 
     def _extract_with_patterns(
         self,
@@ -307,6 +399,16 @@ class FieldParser:
                 )
 
                 value = value.strip()
+
+                # Normalize Aadhaar number formatting.
+                if field_name == "aadhaar_number":
+                    digits = re.sub(r"\D", "", value)
+                    if len(digits) == 12:
+                        value = (
+                            digits[:4] + " " +
+                            digits[4:8] + " " +
+                            digits[8:12]
+                        )
 
                 confidence = self._find_box_confidence(
                     value,
