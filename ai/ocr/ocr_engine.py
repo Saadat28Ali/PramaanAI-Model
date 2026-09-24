@@ -1,4 +1,4 @@
-"""Lightweight RapidOCR text extraction for document processing."""
+"""Lightweight Tesseract OCR text extraction for document processing."""
 
 import cv2
 import numpy as np
@@ -6,6 +6,9 @@ import numpy as np
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
+import os
+import shutil
+import time
 
 from loguru import logger
 
@@ -43,13 +46,22 @@ class OCRResult:
     full_text: str
     avg_confidence: float
     engine_used: str
-    raw_output: Optional[dict] = field(default=None, repr=False)
+    raw_output: Optional[dict] = field(
+        default=None,
+        repr=False,
+    )
 
     def to_dict(self) -> dict:
         return {
-            "boxes": [b.to_dict() for b in self.boxes],
+            "boxes": [
+                b.to_dict()
+                for b in self.boxes
+            ],
             "full_text": self.full_text,
-            "avg_confidence": round(self.avg_confidence, 4),
+            "avg_confidence": round(
+                self.avg_confidence,
+                4,
+            ),
             "engine_used": self.engine_used,
         }
 
@@ -63,24 +75,27 @@ class BaseOCREngine(ABC):
     """Abstract base class for OCR engines."""
 
     @abstractmethod
-    def extract(self, image: np.ndarray) -> OCRResult:
+    def extract(
+        self,
+        image: np.ndarray,
+    ) -> OCRResult:
         """Run OCR on the image and return structured results."""
         pass
 
 
 # ============================================================
-# RAPIDOCR ENGINE
+# TESSERACT OCR ENGINE
 # ============================================================
 
 
-class RapidOCREngine(BaseOCREngine):
+class TesseractOCREngine(BaseOCREngine):
     """
-    Lightweight RapidOCR engine for document text extraction.
+    Lightweight Tesseract OCR engine for document text extraction.
 
-    Uses ONNX Runtime instead of PyTorch/PaddlePaddle.
+    Uses the system Tesseract binary.
 
-    The OCR engine is initialized lazily so the models are only
-    loaded when OCR is actually requested.
+    Tesseract is loaded lazily so the OCR engine is only
+    initialized when OCR is actually requested.
     """
 
     def __init__(
@@ -90,50 +105,162 @@ class RapidOCREngine(BaseOCREngine):
 
         self.config = config or OCRConfig()
 
-        self._engine = None
+        self._engine_loaded = False
 
         # Maximum dimension sent to OCR.
-        #
-        # This is intentionally kept at 1600 to avoid sending
-        # unnecessarily large document images into the OCR model.
+        # Keeping this limited helps control memory and latency.
         self.max_dimension = 1600
 
         # Ignore extremely low-confidence detections.
-        self.min_confidence = 0.20
+        # Tesseract confidence is returned as 0-100.
+        self.min_confidence = 20.0
 
         # Ignore extremely short detections.
         self.min_text_length = 2
 
+        # Tesseract configuration.
+        #
+        # --oem 1 = LSTM OCR engine
+        # --psm 6 = Assume a single uniform block of text
+        self.tesseract_config = "--oem 1 --psm 11"
+
+        # Actual Tesseract executable path.
+        self.tesseract_cmd = None
+
     # ========================================================
-    # LOAD RAPIDOCR
+    # FIND TESSERACT
+    # ========================================================
+
+    def _find_tesseract(self) -> str:
+        """
+        Find the Tesseract executable.
+
+        Windows:
+            Uses the standard UB Mannheim installation path.
+
+        Linux/Render:
+            Uses PATH lookup.
+
+        Returns:
+            Absolute path to tesseract executable.
+        """
+
+        # ----------------------------------------------------
+        # 1. Environment variable
+        # ----------------------------------------------------
+
+        env_path = os.environ.get(
+            "TESSERACT_CMD"
+        )
+
+        if env_path:
+
+            if os.path.isfile(env_path):
+
+                logger.info(
+                    f"Using Tesseract from TESSERACT_CMD: "
+                    f"{env_path}"
+                )
+
+                return env_path
+
+        # ----------------------------------------------------
+        # 2. Windows standard installation
+        # ----------------------------------------------------
+
+        windows_paths = [
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+        ]
+
+        for path in windows_paths:
+
+            if os.path.isfile(path):
+
+                logger.info(
+                    f"Using Windows Tesseract: {path}"
+                )
+
+                return path
+
+        # ----------------------------------------------------
+        # 3. PATH lookup
+        # ----------------------------------------------------
+
+        path_result = shutil.which(
+            "tesseract"
+        )
+
+        if path_result:
+
+            logger.info(
+                f"Using Tesseract from PATH: "
+                f"{path_result}"
+            )
+
+            return path_result
+
+        # ----------------------------------------------------
+        # 4. Not found
+        # ----------------------------------------------------
+
+        raise FileNotFoundError(
+            "Tesseract executable not found. "
+            "On Windows install Tesseract to "
+            r"C:\Program Files\Tesseract-OCR\ "
+            "or set TESSERACT_CMD. "
+            "On Linux/Render install the "
+            "tesseract-ocr system package."
+        )
+
+    # ========================================================
+    # LOAD TESSERACT
     # ========================================================
 
     def _load_engine(self) -> None:
-        """Lazy-load RapidOCR."""
+        """Check that the Tesseract binary is available."""
 
-        if self._engine is not None:
+        if self._engine_loaded:
             return
 
         try:
 
-            from rapidocr import RapidOCR
+            import pytesseract
 
-            logger.info(
-                "Loading RapidOCR engine..."
+            # Find actual executable.
+            self.tesseract_cmd = (
+                self._find_tesseract()
             )
 
-            self._engine = RapidOCR()
+            # Explicitly tell pytesseract which
+            # executable to use.
+            pytesseract.pytesseract.tesseract_cmd = (
+                self.tesseract_cmd
+            )
+
+            # Verify the executable.
+            version = (
+                pytesseract.get_tesseract_version()
+            )
 
             logger.info(
-                "RapidOCR engine loaded successfully"
+                f"Tesseract loaded successfully: "
+                f"{version}"
             )
+
+            logger.info(
+                f"Tesseract executable: "
+                f"{self.tesseract_cmd}"
+            )
+
+            self._engine_loaded = True
 
         except ImportError:
 
             logger.error(
-                "RapidOCR is not installed. "
+                "pytesseract is not installed. "
                 "Install with: "
-                "pip install rapidocr onnxruntime"
+                "pip install pytesseract"
             )
 
             raise
@@ -141,7 +268,7 @@ class RapidOCREngine(BaseOCREngine):
         except Exception as e:
 
             logger.error(
-                f"RapidOCR initialization failed: {e}"
+                f"Tesseract initialization failed: {e}"
             )
 
             raise
@@ -211,45 +338,41 @@ class RapidOCREngine(BaseOCREngine):
 
     def _convert_bbox(
         self,
-        bbox,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
         scale: float,
     ) -> List[List[int]]:
         """
-        Convert RapidOCR polygon coordinates back to the
-        original image coordinate system.
+        Convert Tesseract bounding box coordinates back to
+        the original image coordinate system.
 
-        RapidOCR normally returns:
-
-        [
-            [x1, y1],
-            [x2, y2],
-            [x3, y3],
-            [x4, y4]
-        ]
+        Returns polygon in the same format used by the
+        previous OCR implementation.
         """
 
         if scale <= 0:
             scale = 1.0
 
-        converted = []
-
-        for point in bbox:
-
-            x = int(
-                float(point[0])
-                / scale
-            )
-
-            y = int(
-                float(point[1])
-                / scale
-            )
-
-            converted.append(
-                [x, y]
-            )
-
-        return converted
+        return [
+            [
+                int(x / scale),
+                int(y / scale),
+            ],
+            [
+                int((x + width) / scale),
+                int(y / scale),
+            ],
+            [
+                int((x + width) / scale),
+                int((y + height) / scale),
+            ],
+            [
+                int(x / scale),
+                int((y + height) / scale),
+            ],
+        ]
 
     # ========================================================
     # OCR EXTRACTION
@@ -259,7 +382,17 @@ class RapidOCREngine(BaseOCREngine):
         self,
         image: np.ndarray,
     ) -> OCRResult:
-        """Run RapidOCR on the supplied image."""
+        """Run Tesseract OCR on the supplied image."""
+
+        # ====================================================
+        # START TIMER
+        # ====================================================
+
+        ocr_start = time.perf_counter()
+
+        # ====================================================
+        # LOAD ENGINE
+        # ====================================================
 
         self._load_engine()
 
@@ -270,26 +403,32 @@ class RapidOCREngine(BaseOCREngine):
         if image is None or image.size == 0:
 
             logger.warning(
-                "Empty image supplied to RapidOCR"
+                "Empty image supplied to Tesseract"
             )
 
             return OCRResult(
                 boxes=[],
                 full_text="",
                 avg_confidence=0.0,
-                engine_used="rapidocr",
+                engine_used="tesseract",
             )
+
+        # ====================================================
+        # IMPORT LAZILY
+        # ====================================================
+
+        import pytesseract
 
         # ====================================================
         # PREPARE IMAGE
         # ====================================================
 
-        image_for_ocr, scale = self._prepare_image(
-            image
+        image_for_ocr, scale = (
+            self._prepare_image(image)
         )
 
         logger.info(
-            f"RapidOCR input size: "
+            f"Tesseract input size: "
             f"{image_for_ocr.shape[1]}x"
             f"{image_for_ocr.shape[0]}"
         )
@@ -300,143 +439,90 @@ class RapidOCREngine(BaseOCREngine):
 
         try:
 
-            result = self._engine(
-                image_for_ocr
+            inference_start = time.perf_counter()
+
+            data = pytesseract.image_to_data(
+                image_for_ocr,
+                config=self.tesseract_config,
+                output_type=pytesseract.Output.DICT,
+            )
+
+            inference_time = (
+                time.perf_counter()
+                - inference_start
+            )
+
+            logger.info(
+                f"Tesseract inference time: "
+                f"{inference_time:.3f}s"
             )
 
         except Exception as e:
 
             logger.error(
-                f"RapidOCR inference failed: {e}"
+                f"Tesseract inference failed: {e}"
             )
 
             raise
 
         # ====================================================
-        # HANDLE EMPTY RESULT
+        # EXTRACT RAW DATA
         # ====================================================
 
-        if result is None:
+        boxes: List[OCRBox] = []
 
-            logger.warning(
-                "RapidOCR returned no result"
-            )
+        texts = data.get(
+            "text",
+            [],
+        )
 
-            return OCRResult(
-                boxes=[],
-                full_text="",
-                avg_confidence=0.0,
-                engine_used="rapidocr",
-            )
+        confidences = data.get(
+            "conf",
+            [],
+        )
 
-        # ====================================================
-        # RAPIDOCR RESULT FORMAT
-        # ====================================================
-        #
-        # Depending on the RapidOCR version, result may
-        # expose:
-        #
-        #   result.boxes
-        #   result.txts
-        #   result.scores
-        #
-        # or behave like:
-        #
-        #   [boxes, texts, scores]
-        #
-        # We handle both forms.
-        # ====================================================
+        lefts = data.get(
+            "left",
+            [],
+        )
 
-        boxes_raw = None
-        texts_raw = None
-        scores_raw = None
+        tops = data.get(
+            "top",
+            [],
+        )
 
-        # ----------------------------------------------------
-        # New/result-object style
-        # ----------------------------------------------------
+        widths = data.get(
+            "width",
+            [],
+        )
 
-        if hasattr(result, "boxes"):
-
-            boxes_raw = result.boxes
-
-        elif hasattr(result, "polys"):
-
-            boxes_raw = result.polys
-
-        # ----------------------------------------------------
-        # Text
-        # ----------------------------------------------------
-
-        if hasattr(result, "txts"):
-
-            texts_raw = result.txts
-
-        elif hasattr(result, "texts"):
-
-            texts_raw = result.texts
-
-        # ----------------------------------------------------
-        # Scores
-        # ----------------------------------------------------
-
-        if hasattr(result, "scores"):
-
-            scores_raw = result.scores
-
-        # ----------------------------------------------------
-        # Tuple/list style
-        # ----------------------------------------------------
-
-        if (
-            boxes_raw is None
-            and isinstance(result, (tuple, list))
-            and len(result) >= 3
-        ):
-
-            boxes_raw = result[0]
-            texts_raw = result[1]
-            scores_raw = result[2]
-
-        # ====================================================
-        # SAFETY CHECK
-        # ====================================================
-
-        if (
-            boxes_raw is None
-            or texts_raw is None
-            or scores_raw is None
-        ):
-
-            logger.warning(
-                "RapidOCR returned an unexpected result format"
-            )
-
-            logger.debug(
-                f"RapidOCR result type: "
-                f"{type(result)}"
-            )
-
-            return OCRResult(
-                boxes=[],
-                full_text="",
-                avg_confidence=0.0,
-                engine_used="rapidocr",
-            )
+        heights = data.get(
+            "height",
+            [],
+        )
 
         # ====================================================
         # CONVERT RESULTS
         # ====================================================
 
-        boxes: List[OCRBox] = []
-
-        for bbox, text, confidence in zip(
-            boxes_raw,
-            texts_raw,
-            scores_raw,
+        for (
+            text,
+            confidence,
+            x,
+            y,
+            width,
+            height,
+        ) in zip(
+            texts,
+            confidences,
+            lefts,
+            tops,
+            widths,
+            heights,
         ):
 
             # ------------------------------------------------
-            # Text
+            # TEXT
             # ------------------------------------------------
 
             if text is None:
@@ -451,7 +537,7 @@ class RapidOCREngine(BaseOCREngine):
                 continue
 
             # ------------------------------------------------
-            # Confidence
+            # CONFIDENCE
             # ------------------------------------------------
 
             try:
@@ -467,18 +553,23 @@ class RapidOCREngine(BaseOCREngine):
 
                 continue
 
+            # Tesseract returns -1 for invalid/empty
+            # confidence values.
             if confidence < self.min_confidence:
                 continue
 
             # ------------------------------------------------
-            # Bounding box
+            # BOUNDING BOX
             # ------------------------------------------------
 
             try:
 
                 bbox_converted = (
                     self._convert_bbox(
-                        bbox,
+                        int(x),
+                        int(y),
+                        int(width),
+                        int(height),
                         scale,
                     )
                 )
@@ -492,27 +583,24 @@ class RapidOCREngine(BaseOCREngine):
                 continue
 
             # ------------------------------------------------
-            # Store
+            # STORE
             # ------------------------------------------------
 
             boxes.append(
                 OCRBox(
                     text=text,
-                    confidence=confidence,
+                    confidence=confidence / 100.0,
                     bbox=bbox_converted,
-                    engine="rapidocr",
+                    engine="tesseract",
                 )
             )
 
         # ====================================================
         # SORT BOXES
         # ====================================================
-        #
+
         # Top -> bottom
         # Left -> right
-        #
-        # This keeps full_text in a sensible document order.
-        # ====================================================
 
         boxes.sort(
             key=lambda box: (
@@ -550,19 +638,33 @@ class RapidOCREngine(BaseOCREngine):
             avg_confidence = 0.0
 
         # ====================================================
+        # TOTAL OCR TIME
+        # ====================================================
+
+        total_time = (
+            time.perf_counter()
+            - ocr_start
+        )
+
+        # ====================================================
         # LOG
         # ====================================================
 
         logger.info(
-            f"RapidOCR: "
+            f"Tesseract: "
             f"{len(boxes)} relevant text regions, "
             f"avg confidence: "
             f"{avg_confidence:.3f}"
         )
 
         logger.info(
-            f"RapidOCR extracted text: "
+            f"Tesseract extracted text: "
             f"{full_text[:500]}"
+        )
+
+        logger.info(
+            f"Tesseract total OCR time: "
+            f"{total_time:.3f}s"
         )
 
         # ====================================================
@@ -573,7 +675,7 @@ class RapidOCREngine(BaseOCREngine):
             boxes=boxes,
             full_text=full_text,
             avg_confidence=avg_confidence,
-            engine_used="rapidocr",
+            engine_used="tesseract",
         )
 
 
@@ -584,10 +686,10 @@ class RapidOCREngine(BaseOCREngine):
 
 class OCREngineManager:
     """
-    Manages RapidOCR as the single OCR engine.
+    Manages Tesseract as the single OCR engine.
 
-    The engine is created lazily so OCR models are not loaded
-    unless OCR is actually requested.
+    The engine is created lazily so the OCR process does not
+    consume resources until OCR is actually requested.
     """
 
     def __init__(
@@ -605,12 +707,12 @@ class OCREngineManager:
 
     def _get_engine(
         self,
-    ) -> RapidOCREngine:
+    ) -> TesseractOCREngine:
 
         if self._engine is None:
 
             self._engine = (
-                RapidOCREngine(
+                TesseractOCREngine(
                     self.config
                 )
             )
@@ -625,7 +727,7 @@ class OCREngineManager:
         self,
         image: np.ndarray,
     ) -> OCRResult:
-        """Extract text using RapidOCR."""
+        """Extract text using Tesseract."""
 
         engine = self._get_engine()
 
@@ -639,17 +741,18 @@ class OCREngineManager:
             RuntimeError,
             ValueError,
             OSError,
+            FileNotFoundError,
         ) as e:
 
             logger.error(
-                f"RapidOCR failed: {e}"
+                f"Tesseract failed: {e}"
             )
 
             return OCRResult(
                 boxes=[],
                 full_text="",
                 avg_confidence=0.0,
-                engine_used="rapidocr",
+                engine_used="tesseract",
             )
 
     # ========================================================
@@ -666,8 +769,8 @@ class OCREngineManager:
         """
         Kept for backward compatibility.
 
-        RapidOCR is now the only OCR engine, so both returned
-        results are the same OCR result.
+        Tesseract is now the only OCR engine, so both
+        returned results are the same OCR result.
         """
 
         result = self.extract(
