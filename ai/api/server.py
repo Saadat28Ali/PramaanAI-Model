@@ -15,6 +15,7 @@ from fastapi import (
     FastAPI,
     File,
     UploadFile,
+    Form,
     WebSocket,
     WebSocketDisconnect,
     HTTPException,
@@ -231,6 +232,7 @@ async def verify_document(
     file: UploadFile = File(...),
     selfie_file: Optional[UploadFile] = File(None),
     skip_quality_gate: bool = False,
+    doc_type: Optional[str] = Form(None),
 ):
     """Verify a document and optionally compare it with a selfie."""
 
