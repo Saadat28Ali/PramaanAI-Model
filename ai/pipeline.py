@@ -219,6 +219,7 @@ class DocuNetPipeline:
         skip_quality_gate: bool = False,
         skip_ocr: bool = False,
         selfie_image: Optional[np.ndarray] = None,
+        doc_type: Optional[str] = None,
     ) -> PipelineResult:
         """Process a document image through the full pipeline.
 
@@ -341,13 +342,13 @@ class DocuNetPipeline:
         if not skip_ocr:
             t0 = time.time()
             try:
-                ocr_result = self.ocr_manager.extract(enhanced)
+                ocr_result = self.ocr_manager.extract(image)
                 result.timings["ocr"] = (time.time() - t0) * 1000
                 result.ocr_result = ocr_result
                 result.stage_reached = "ocr"
 
                 t0 = time.time()
-                parsed = self.field_parser.parse(ocr_result)
+                parsed = self.field_parser.parse(ocr_result, doc_type=doc_type)
                 result.timings["field_parsing"] = (time.time() - t0) * 1000
                 result.parsed_document = parsed
                 result.stage_reached = "field_parsing"
@@ -375,6 +376,7 @@ class DocuNetPipeline:
         skip_quality_gate: bool = False,
         skip_ocr: bool = False,
         selfie_image: Optional[np.ndarray] = None,
+        doc_type: Optional[str] = None,
     ) -> PipelineResult:
         """Load an image from disk and process it."""
         image = cv2.imread(image_path)
@@ -390,6 +392,7 @@ class DocuNetPipeline:
             skip_quality_gate=skip_quality_gate,
             skip_ocr=skip_ocr,
             selfie_image=selfie_image,
+            doc_type=doc_type,
         )
 
     def save_results(
