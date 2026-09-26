@@ -15,12 +15,12 @@ from fastapi import (
     FastAPI,
     File,
     UploadFile,
-    Form,
     WebSocket,
     WebSocketDisconnect,
     HTTPException,
     Request,
     Response,
+    Form,
 )
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -231,8 +231,8 @@ async def health_check():
 async def verify_document(
     file: UploadFile = File(...),
     selfie_file: Optional[UploadFile] = File(None),
-    skip_quality_gate: bool = False,
     doc_type: Optional[str] = Form(None),
+    skip_quality_gate: bool = False,
 ):
     """Verify a document and optionally compare it with a selfie."""
 
@@ -261,6 +261,7 @@ async def verify_document(
         selfie_image=selfie_image,
         skip_quality_gate=skip_quality_gate,
         skip_ocr=False,
+        doc_type=doc_type,
     )
 
     data = make_json_safe(result.to_dict())
