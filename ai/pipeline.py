@@ -339,24 +339,9 @@ class DocuNetPipeline:
         if copymove_result.is_copymove:
             result.images["copymove_vis"] = copymove_result.visualisation
 
-        if not skip_ocr:
-            t0 = time.time()
-            try:
-                ocr_result = self.ocr_manager.extract(image)
-                result.timings["ocr"] = (time.time() - t0) * 1000
-                result.ocr_result = ocr_result
-                result.stage_reached = "ocr"
-
-                t0 = time.time()
-                parsed = self.field_parser.parse(ocr_result, doc_type=doc_type)
-                result.timings["field_parsing"] = (time.time() - t0) * 1000
-                result.parsed_document = parsed
-                result.stage_reached = "field_parsing"
-
-            except (RuntimeError, ValueError, OSError) as e:
-                logger.error(f"OCR failed: {e}")
-                result.error_message = f"OCR extraction failed: {str(e)}"
-                # Continue — tamper detection results are still valid
+        # OCR extraction and field parsing are intentionally disabled.
+        # All other pipeline stages continue to run unchanged.
+        logger.info("OCR and field parsing are disabled.")
 
         result.success = True
         result.stage_reached = "complete"
