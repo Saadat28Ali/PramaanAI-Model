@@ -126,6 +126,13 @@ class VerifyResponse(BaseModel):
     stage_reached: str
     error_message: Optional[str] = None
     total_time_ms: float
+
+    # Student-side usability decision
+    usable: Optional[bool] = None
+    status: Optional[str] = None
+    message: Optional[str] = None
+    reupload_reasons: Optional[List[str]] = None
+
     quality: Optional[dict] = None
     rectification: Optional[dict] = None
     glare: Optional[dict] = None
@@ -267,6 +274,58 @@ async def verify_document(
     data = make_json_safe(result.to_dict())
 
     return VerifyResponse(**data)
+
+
+@app.post("/api/v1/tamper-analysis")
+async def tamper_analysis(
+    file: UploadFile = File(...),
+    include_visualization: bool = Form(True),
+):
+    """Run officer-side forensic analysis and optionally return an image overlay."""
+    file_bytes = await file.read()
+    image = decode_upload(file_bytes)
+
+    pipeline = get_pipeline()
+    result = pipeline.process_tamper_analysis(
+        image,
+        include_visualization=include_visualization,
+    )
+
+    # Remove region coordinates/details from the API response only.
+    # The forensic detectors still run normally and their scores,
+    # thresholds, messages, and suspicious flags are preserved.
+    region_detail_keys = {
+        "suspicious_regions",
+        "suspicious_blocks",
+        "matched_regions",
+        "regions_drawn",
+        "legend",
+    }
+
+    def remove_region_details(value):
+        if isinstance(value, dict):
+            return {
+                key: remove_region_details(item)
+                for key, item in value.items()
+                if key not in region_detail_keys
+            }
+
+        if isinstance(value, list):
+            return [remove_region_details(item) for item in value]
+
+        return value
+
+    response_data = remove_region_details(make_json_safe(result))
+
+    # The visualization no longer contains highlighted bounding boxes.
+    if response_data.get("recommendation"):
+        response_data["recommendation"] = (
+            "Review the forensic findings and compare them with the "
+            "original document or a trusted source before making a "
+            "verification decision."
+        )
+
+    return JSONResponse(content=response_data)
 
 
 @app.post("/api/v1/ela-only")
